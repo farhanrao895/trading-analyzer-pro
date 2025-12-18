@@ -134,11 +134,14 @@ const SignalBadge = ({ signal }: { signal: string }) => {
 
 const IndicatorCard = ({ name, indicator, icon }: { name: string; indicator: IndicatorData; icon: string }) => {
   const getDisplayValue = () => {
-    // Special handling for MACD
+    // Special handling for MACD - cleaner formatting
     if (name === "MACD" && typeof indicator.value === 'object' && indicator.value !== null) {
       const macdData = indicator.value as any
       if (macdData.macd !== undefined) {
-        return `MACD: ${macdData.macd.toFixed(2)} | Signal: ${macdData.signal?.toFixed(2) || 'N/A'} | Hist: ${macdData.histogram?.toFixed(2) || 'N/A'}`
+        const macd = macdData.macd.toFixed(6)
+        const signal = macdData.signal?.toFixed(6) || 'N/A'
+        const hist = macdData.histogram?.toFixed(6) || 'N/A'
+        return `${macd}`
       }
     }
     
@@ -149,6 +152,20 @@ const IndicatorCard = ({ name, indicator, icon }: { name: string; indicator: Ind
       return JSON.stringify(indicator.value).substring(0, 30) + '...'
     }
     return indicator.value || indicator.position || indicator.trend || indicator.key_level || '-'
+  }
+
+  const getMacdDetails = () => {
+    if (name === "MACD" && typeof indicator.value === 'object' && indicator.value !== null) {
+      const macdData = indicator.value as any
+      if (macdData.macd !== undefined) {
+        return {
+          macd: macdData.macd.toFixed(6),
+          signal: macdData.signal?.toFixed(6) || 'N/A',
+          histogram: macdData.histogram?.toFixed(6) || 'N/A'
+        }
+      }
+    }
+    return null
   }
 
   return (
@@ -164,6 +181,14 @@ const IndicatorCard = ({ name, indicator, icon }: { name: string; indicator: Ind
       <div className="text-xl font-bold text-white mb-1">
         {getDisplayValue()}
       </div>
+      
+      {/* MACD Details */}
+      {name === "MACD" && getMacdDetails() && (
+        <div className="text-xs text-slate-400 space-y-0.5 mb-2">
+          <div>Signal: <span className="text-slate-300">{getMacdDetails()?.signal}</span></div>
+          <div>Histogram: <span className="text-slate-300">{getMacdDetails()?.histogram}</span></div>
+        </div>
+      )}
       
       {indicator.score !== undefined && (
         <div className="mt-2">
@@ -802,6 +827,18 @@ export default function TradingAnalyzerPro() {
                     <IndicatorCard name="Volume" indicator={result.indicators.volume} icon="📦" />
                   )}
                 </div>
+              </div>
+            )}
+
+            {/* Chart Pattern & Divergence */}
+            {(result?.chart_pattern || result?.indicators?.divergence) && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {result.chart_pattern && (
+                  <ChartPatternCard pattern={result.chart_pattern} />
+                )}
+                {result.indicators?.divergence && (
+                  <DivergenceCard divergence={result.indicators.divergence} />
+                )}
               </div>
             )}
 
