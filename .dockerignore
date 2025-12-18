@@ -1,0 +1,13 @@
+node_modules
+.next
+.git
+.env
+*.md
+app/
+api/
+start_*.bat
+*.bat
+railway.json
+vercel.json
+nixpacks.toml
+
