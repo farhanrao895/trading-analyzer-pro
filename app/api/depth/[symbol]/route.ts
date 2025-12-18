@@ -34,11 +34,11 @@ export async function GET(
     })) || []
     
     const largest_bid = bids.length > 0 
-      ? bids.reduce((max, b) => b.quantity > max.quantity ? b : max, bids[0])
+      ? bids.reduce((max: { price: number; quantity: number }, b: { price: number; quantity: number }) => b.quantity > max.quantity ? b : max, bids[0])
       : { price: 0, quantity: 0 }
     
     const largest_ask = asks.length > 0
-      ? asks.reduce((max, a) => a.quantity > max.quantity ? a : max, asks[0])
+      ? asks.reduce((max: { price: number; quantity: number }, a: { price: number; quantity: number }) => a.quantity > max.quantity ? a : max, asks[0])
       : { price: 0, quantity: 0 }
     
     return NextResponse.json({
@@ -47,8 +47,8 @@ export async function GET(
       asks,
       largest_bid_wall: largest_bid,
       largest_ask_wall: largest_ask,
-      bid_depth: bids.reduce((sum, b) => sum + b.quantity, 0),
-      ask_depth: asks.reduce((sum, a) => sum + a.quantity, 0)
+      bid_depth: bids.reduce((sum: number, b: { price: number; quantity: number }) => sum + b.quantity, 0),
+      ask_depth: asks.reduce((sum: number, a: { price: number; quantity: number }) => sum + a.quantity, 0)
     })
   } catch (error: any) {
     return NextResponse.json(
