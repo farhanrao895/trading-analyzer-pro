@@ -36,6 +36,9 @@ interface IndicatorData {
   price_at_level?: number
   nearest_support?: number
   nearest_resistance?: number
+  type?: string
+  indicator?: string
+  strength?: string
 }
 
 interface TradeSetup {
@@ -64,6 +67,18 @@ interface BinanceData {
   quote_volume: number
 }
 
+interface ChartPattern {
+  name?: string
+  type?: string
+  direction?: string
+  reliability?: string
+  status?: string
+  description?: string
+  score?: number
+  weight?: number
+  weighted_score?: number
+}
+
 interface AnalysisResult {
   success: boolean
   symbol: string
@@ -71,6 +86,7 @@ interface AnalysisResult {
   current_price: number
   binance_data: BinanceData
   calculated_indicators: any
+  chart_pattern?: ChartPattern
   indicators: Record<string, IndicatorData>
   trade_setup: TradeSetup
   support_levels: SupportResistance[]
@@ -235,6 +251,145 @@ const TradeSetupCard = ({ setup }: { setup: TradeSetup }) => {
   )
 }
 
+const ChartPatternCard = ({ pattern }: { pattern?: ChartPattern }) => {
+  if (!pattern || !pattern.name || pattern.name === 'none') {
+    return (
+      <div className="bg-slate-800/60 rounded-xl p-5 border border-slate-700">
+        <h3 className="font-bold text-white mb-2 flex items-center gap-2">
+          <span className="text-xl">🔍</span> Chart Pattern
+        </h3>
+        <div className="text-slate-400 text-sm">No pattern detected</div>
+      </div>
+    )
+  }
+
+  const getDirectionColor = () => {
+    if (pattern.direction === 'bullish') return 'text-green-400'
+    if (pattern.direction === 'bearish') return 'text-red-400'
+    return 'text-slate-400'
+  }
+
+  const getReliabilityColor = () => {
+    if (pattern.reliability === 'strong') return 'text-green-400'
+    if (pattern.reliability === 'moderate') return 'text-yellow-400'
+    return 'text-slate-400'
+  }
+
+  return (
+    <div className="bg-slate-800/60 rounded-xl p-5 border border-slate-700">
+      <h3 className="font-bold text-white mb-3 flex items-center gap-2">
+        <span className="text-xl">🔍</span> Chart Pattern Detected
+      </h3>
+      
+      <div className="space-y-2">
+        <div>
+          <div className="text-lg font-bold text-white">{pattern.name}</div>
+          <div className="text-xs text-slate-400 mt-1">{pattern.type} • {pattern.status}</div>
+        </div>
+        
+        <div className="flex items-center gap-2 mt-3">
+          <span className="text-xs text-slate-400">Direction:</span>
+          <span className={`text-sm font-medium ${getDirectionColor()}`}>
+            {pattern.direction?.toUpperCase() || 'N/A'}
+          </span>
+        </div>
+        
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-slate-400">Reliability:</span>
+          <span className={`text-sm font-medium ${getReliabilityColor()}`}>
+            {pattern.reliability?.toUpperCase() || 'N/A'}
+          </span>
+        </div>
+        
+        {pattern.description && (
+          <div className="mt-3 p-3 bg-slate-900/50 rounded-lg">
+            <div className="text-xs text-slate-400 mb-1">Explanation:</div>
+            <div className="text-sm text-slate-300">{pattern.description}</div>
+          </div>
+        )}
+        
+        {pattern.score !== undefined && (
+          <div className="mt-3 flex items-center justify-between text-xs">
+            <span className="text-slate-400">Pattern Score</span>
+            <span className="text-cyan-400 font-medium">{pattern.score}/100 × {pattern.weight}% = {pattern.weighted_score?.toFixed(1) || 0}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+const DivergenceCard = ({ divergence }: { divergence?: IndicatorData }) => {
+  if (!divergence || divergence.type === 'none' || divergence.type === undefined) {
+    return (
+      <div className="bg-slate-800/60 rounded-xl p-5 border border-slate-700">
+        <h3 className="font-bold text-white mb-2 flex items-center gap-2">
+          <span className="text-xl">↕️</span> Divergence
+        </h3>
+        <div className="text-slate-400 text-sm">No divergence detected</div>
+      </div>
+    )
+  }
+
+  const getSignalColor = () => {
+    if (divergence.signal === 'bullish') return 'text-green-400'
+    if (divergence.signal === 'bearish') return 'text-red-400'
+    return 'text-slate-400'
+  }
+
+  const getTypeLabel = () => {
+    const type = divergence.type as string
+    if (type.includes('bullish')) return '🟢 Bullish Divergence'
+    if (type.includes('bearish')) return '🔴 Bearish Divergence'
+    return 'Divergence'
+  }
+
+  return (
+    <div className="bg-slate-800/60 rounded-xl p-5 border border-slate-700">
+      <h3 className="font-bold text-white mb-3 flex items-center gap-2">
+        <span className="text-xl">↕️</span> Divergence Detected
+      </h3>
+      
+      <div className="space-y-2">
+        <div className={`text-lg font-bold ${getSignalColor()}`}>
+          {getTypeLabel()}
+        </div>
+        
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-slate-400">Type:</span>
+          <span className="text-sm text-slate-300">{divergence.type}</span>
+        </div>
+        
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-slate-400">Indicator:</span>
+          <span className="text-sm text-cyan-400 font-medium">{divergence.indicator || 'N/A'}</span>
+        </div>
+        
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-slate-400">Strength:</span>
+          <span className={`text-sm font-medium ${getSignalColor()}`}>
+            {divergence.strength?.toUpperCase() || 'N/A'}
+          </span>
+        </div>
+        
+        {divergence.explanation && (
+          <div className="mt-3 p-3 bg-slate-900/50 rounded-lg">
+            <div className="text-xs text-slate-400 mb-1">Explanation:</div>
+            <div className="text-sm text-slate-300">{divergence.explanation}</div>
+          </div>
+        )}
+        
+        {divergence.score !== undefined && (
+          <div className="mt-3 flex items-center justify-between text-xs">
+            <span className="text-slate-400">Divergence Score</span>
+            <span className="text-cyan-400 font-medium">{divergence.score}/100 × {divergence.weight}% = {divergence.weighted_score?.toFixed(1) || 0}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 const ConfluenceScoreCard = ({ score, breakdown }: { score: number; breakdown: Record<string, number> }) => {
   const getScoreColor = () => {
     if (score >= 70) return 'text-green-400'
@@ -280,10 +435,12 @@ const ConfluenceScoreCard = ({ score, breakdown }: { score: number; breakdown: R
               <div className="w-20 h-1.5 bg-slate-700 rounded-full overflow-hidden">
                 <div 
                   className="h-full bg-cyan-500 rounded-full"
-                  style={{ width: `${Math.min(100, (value / 15) * 100)}%` }}
+                  style={{ width: `${Math.min(100, (Math.abs(value) / 20) * 100)}%` }}
                 />
               </div>
-              <span className="text-cyan-400 w-8 text-right font-medium">+{value.toFixed(1)}</span>
+              <span className={`w-12 text-right font-medium ${value >= 0 ? 'text-cyan-400' : 'text-red-400'}`}>
+                {value >= 0 ? '+' : ''}{value.toFixed(1)}
+              </span>
             </div>
           </div>
         ))}

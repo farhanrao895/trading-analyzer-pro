@@ -712,6 +712,108 @@ class IndicatorEngine:
         }
     
     @staticmethod
+    def find_peaks_and_troughs(values: List[float], lookback: int = 5) -> tuple:
+        """Find peaks (local maxima) and troughs (local minima)"""
+        peaks = []
+        troughs = []
+        
+        for i in range(lookback, len(values) - lookback):
+            # Check for peak
+            is_peak = True
+            for j in range(i - lookback, i + lookback + 1):
+                if j != i and values[j] >= values[i]:
+                    is_peak = False
+                    break
+            if is_peak:
+                peaks.append((i, values[i]))
+            
+            # Check for trough
+            is_trough = True
+            for j in range(i - lookback, i + lookback + 1):
+                if j != i and values[j] <= values[i]:
+                    is_trough = False
+                    break
+            if is_trough:
+                troughs.append((i, values[i]))
+        
+        return peaks, troughs
+    
+    @staticmethod
+    def detect_divergence(prices: List[float], indicator_values: List[float], lookback: int = 20) -> Dict:
+        """Detect bullish/bearish divergences between price and indicator (RSI/MACD)"""
+        if len(prices) < lookback * 2 or len(indicator_values) < lookback * 2:
+            return {"type": "none", "signal": "neutral", "strength": "none"}
+        
+        # Get recent data
+        recent_prices = prices[-lookback:]
+        recent_indicators = indicator_values[-lookback:]
+        
+        # Find peaks and troughs in both
+        price_peaks, price_troughs = IndicatorEngine.find_peaks_and_troughs(recent_prices, lookback=3)
+        ind_peaks, ind_troughs = IndicatorEngine.find_peaks_and_troughs(recent_indicators, lookback=3)
+        
+        divergence_type = "none"
+        signal = "neutral"
+        strength = "none"
+        
+        # Check for bullish divergence (price makes lower low, indicator makes higher low)
+        if len(price_troughs) >= 2 and len(ind_troughs) >= 2:
+            # Compare last two troughs
+            price_trough1 = price_troughs[-2][1]  # Earlier trough
+            price_trough2 = price_troughs[-1][1]   # Recent trough
+            ind_trough1 = ind_troughs[-2][1]
+            ind_trough2 = ind_troughs[-1][1]
+            
+            if price_trough2 < price_trough1 and ind_trough2 > ind_trough1:
+                divergence_type = "bullish_regular"
+                signal = "bullish"
+                strength = "strong" if (ind_trough2 - ind_trough1) > (price_trough1 - price_trough2) * 0.1 else "moderate"
+        
+        # Check for bearish divergence (price makes higher high, indicator makes lower high)
+        if len(price_peaks) >= 2 and len(ind_peaks) >= 2:
+            price_peak1 = price_peaks[-2][1]
+            price_peak2 = price_peaks[-1][1]
+            ind_peak1 = ind_peaks[-2][1]
+            ind_peak2 = ind_peaks[-1][1]
+            
+            if price_peak2 > price_peak1 and ind_peak2 < ind_peak1:
+                divergence_type = "bearish_regular"
+                signal = "bearish"
+                strength = "strong" if (ind_peak1 - ind_peak2) > (price_peak2 - price_peak1) * 0.1 else "moderate"
+        
+        # Check for hidden bullish divergence (price makes higher low, indicator makes lower low)
+        if len(price_troughs) >= 2 and len(ind_troughs) >= 2:
+            price_trough1 = price_troughs[-2][1]
+            price_trough2 = price_troughs[-1][1]
+            ind_trough1 = ind_troughs[-2][1]
+            ind_trough2 = ind_troughs[-1][1]
+            
+            if price_trough2 > price_trough1 and ind_trough2 < ind_trough1:
+                if divergence_type == "none":  # Only set if no regular divergence found
+                    divergence_type = "bullish_hidden"
+                    signal = "bullish"
+                    strength = "moderate"
+        
+        # Check for hidden bearish divergence (price makes lower high, indicator makes higher high)
+        if len(price_peaks) >= 2 and len(ind_peaks) >= 2:
+            price_peak1 = price_peaks[-2][1]
+            price_peak2 = price_peaks[-1][1]
+            ind_peak1 = ind_peaks[-2][1]
+            ind_peak2 = ind_peaks[-1][1]
+            
+            if price_peak2 < price_peak1 and ind_peak2 > ind_peak1:
+                if divergence_type == "none":
+                    divergence_type = "bearish_hidden"
+                    signal = "bearish"
+                    strength = "moderate"
+        
+        return {
+            "type": divergence_type,
+            "signal": signal,
+            "strength": strength
+        }
+    
+    @staticmethod
     def calculate_bollinger(closes: List[float], period: int = 20, std_dev: float = 2.0) -> Dict:
         """Bollinger Bands"""
         if len(closes) < period:
@@ -944,6 +1046,29 @@ def calculate_all_indicators(klines: List[Dict]) -> Dict:
     # MACD
     macd = engine.calculate_macd(closes)
     
+    # Calculate RSI values for divergence detection
+    rsi_values = []
+    for i in range(14, len(closes)):
+        rsi_data = engine.calculate_rsi(closes[:i+1], 14)
+        rsi_values.append(rsi_data["value"])
+    
+    # Calculate MACD histogram values for divergence detection
+    macd_histogram_values = []
+    for i in range(26, len(closes)):
+        macd_data = engine.calculate_macd(closes[:i+1])
+        macd_histogram_values.append(macd_data["histogram"])
+    
+    # Detect divergences
+    rsi_divergence = engine.detect_divergence(closes, rsi_values, lookback=30) if len(rsi_values) >= 30 else {"type": "none", "signal": "neutral", "strength": "none"}
+    macd_divergence = engine.detect_divergence(closes, macd_histogram_values, lookback=30) if len(macd_histogram_values) >= 30 else {"type": "none", "signal": "neutral", "strength": "none"}
+    
+    # Combine divergences (prioritize RSI if both exist)
+    divergence = rsi_divergence if rsi_divergence["type"] != "none" else macd_divergence
+    if divergence["type"] == "none":
+        divergence = {"type": "none", "signal": "neutral", "strength": "none", "indicator": "none"}
+    else:
+        divergence["indicator"] = "RSI" if rsi_divergence["type"] != "none" else "MACD"
+    
     # Bollinger Bands
     bollinger = engine.calculate_bollinger(closes, 20, 2.0)
     
@@ -996,6 +1121,7 @@ def calculate_all_indicators(klines: List[Dict]) -> Dict:
             "price_vs_ema": price_vs_ema
         },
         "macd": macd,
+        "divergence": divergence,
         "bollinger": bollinger,
         "atr": atr,
         "support_resistance": sr_levels,
@@ -1077,6 +1203,7 @@ def build_analysis_prompt(
     rsi = indicators.get("rsi", {})
     ema = indicators.get("ema", {})
     macd = indicators.get("macd", {})
+    divergence = indicators.get("divergence", {})
     bb = indicators.get("bollinger", {})
     atr = indicators.get("atr", 0)
     sr = indicators.get("support_resistance", {})
@@ -1107,6 +1234,7 @@ EMA Alignment: {ema.get('alignment', 'mixed')}
 Price vs EMAs: {ema.get('price_vs_ema', 'mixed')}
 MACD: {macd.get('macd', 0):.6f} | Signal: {macd.get('signal', 0):.6f} | Histogram: {macd.get('histogram', 0):.6f}
 MACD Trend: {macd.get('trend', 'neutral')}
+Divergence: {divergence.get('type', 'none')} ({divergence.get('signal', 'neutral')}) - {divergence.get('indicator', 'none')} - Strength: {divergence.get('strength', 'none')}
 Bollinger Bands: Upper ${bb.get('upper', 0):,.4f} | Middle ${bb.get('middle', 0):,.4f} | Lower ${bb.get('lower', 0):,.4f}
 Bollinger Position: {bb.get('position', 'middle')}
 ATR(14): ${atr:,.4f}
@@ -1153,23 +1281,60 @@ Look at the EMA alignment and price structure. Is price making higher highs/lows
 
 STEP 2: MOMENTUM EVALUATION  
 Evaluate RSI (oversold <30 is bullish, overbought >70 is bearish) and MACD (positive histogram is bullish).
+Check for divergences: Bullish divergence (price lower low, indicator higher low) is very bullish. Bearish divergence (price higher high, indicator lower high) is bearish.
 
-STEP 3: SUPPORT/RESISTANCE ANALYSIS
+STEP 3: CHART PATTERN RECOGNITION (CRITICAL)
+Carefully examine the chart for any recognizable patterns. Look for:
+
+REVERSAL PATTERNS:
+- Head & Shoulders / Inverse Head & Shoulders
+- Double Top / Double Bottom
+- Triple Top / Triple Bottom
+- Rising Wedge / Falling Wedge
+- Ascending Triangle / Descending Triangle
+- Symmetrical Triangle
+- Rectangle / Trading Range
+- Cup & Handle
+- Rounding Bottom / Rounding Top
+
+CONTINUATION PATTERNS:
+- Bull Flag / Bear Flag
+- Pennant (Bullish/Bearish)
+- Ascending Triangle (continuation)
+- Descending Triangle (continuation)
+- Symmetrical Triangle (continuation)
+
+CANDLESTICK PATTERNS:
+- Engulfing Patterns (Bullish/Bearish)
+- Hammer / Hanging Man
+- Doji / Star Patterns
+- Three White Soldiers / Three Black Crows
+
+If you identify ANY pattern:
+1. Name the pattern exactly
+2. Explain what it means (reversal/continuation, bullish/bearish)
+3. Rate its reliability (strong/moderate/weak)
+4. Note the pattern's completion status (forming/completed/failed)
+
+STEP 4: SUPPORT/RESISTANCE ANALYSIS
 Identify where price might bounce (support) or get rejected (resistance).
 
-STEP 4: CONFLUENCE SCORING
+STEP 5: CONFLUENCE SCORING
 Score each indicator 0-100 based on how bullish it is, then multiply by weight:
-- RSI: weight 15%
-- MACD: weight 15%
-- EMA Alignment: weight 15%
-- Price vs EMA: weight 10%
-- S/R Levels: weight 15%
-- Fibonacci: weight 10%
-- Bollinger: weight 10%
-- Volume: weight 10%
+- Chart Pattern: weight 15% (if pattern detected, score based on bullishness; if no pattern, score 50)
+- S/R Levels: weight 20% (increased importance)
+- Divergence: weight 8% (bullish divergence = high score, bearish = low score, none = 50)
+- RSI: weight 10% (reduced)
+- MACD: weight 10% (reduced)
+- EMA Alignment: weight 10% (reduced)
+- Price vs EMA: weight 8%
+- Fibonacci: weight 8%
+- Bollinger: weight 8%
+- Volume: weight 3%
 
-STEP 5: TRADE SETUP
+STEP 6: TRADE SETUP
 Only recommend trade if confluence ≥ 60. Entry at support, SL below support, TPs at resistance levels.
+Consider pattern implications: If a bullish pattern is forming/completed, it strengthens the setup.
 
 === OUTPUT FORMAT (JSON ONLY - NO MARKDOWN, NO CODE BLOCKS) ===
 
@@ -1184,23 +1349,37 @@ Return ONLY valid JSON with this exact structure:
     "trend": "bullish/bearish/neutral",
     "reasoning": "explanation"
   }},
+  "chart_pattern": {{
+    "name": "<pattern name or 'none'>",
+    "type": "reversal/continuation/none",
+    "direction": "bullish/bearish/neutral",
+    "reliability": "strong/moderate/weak/none",
+    "status": "forming/completed/failed/none",
+    "description": "<detailed explanation of the pattern>",
+    "score": <0-100 based on bullishness>,
+    "weight": 15,
+    "weighted_score": <calculated>
+  }},
   "indicators": {{
-    "rsi": {{"value": {rsi.get('value', 50)}, "signal": "{rsi.get('signal', 'neutral')}", "score": <0-100>, "weight": 15, "weighted_score": <calculated>, "explanation": "why"}},
-    "macd": {{"value": {{"macd": {macd.get('macd', 0)}, "signal": {macd.get('signal', 0)}, "histogram": {macd.get('histogram', 0)}}}, "signal": "{macd.get('trend', 'neutral')}", "score": <0-100>, "weight": 15, "weighted_score": <calculated>, "explanation": "why"}},
-    "ema_alignment": {{"value": "{ema.get('alignment', 'mixed')}", "signal": "bullish/bearish/neutral", "score": <0-100>, "weight": 15, "weighted_score": <calculated>, "explanation": "why"}},
-    "price_vs_ema": {{"value": "{ema.get('price_vs_ema', 'mixed')}", "signal": "bullish/bearish/neutral", "score": <0-100>, "weight": 10, "weighted_score": <calculated>, "explanation": "why"}},
-    "support_resistance": {{"nearest_support": <price>, "nearest_resistance": <price>, "signal": "bullish/bearish/neutral", "score": <0-100>, "weight": 15, "weighted_score": <calculated>, "explanation": "why"}},
-    "fibonacci": {{"key_level": "0.618", "price_at_level": <price>, "signal": "bullish/bearish/neutral", "score": <0-100>, "weight": 10, "weighted_score": <calculated>, "explanation": "why"}},
-    "bollinger": {{"position": "{bb.get('position', 'middle')}", "signal": "bullish/bearish/neutral", "score": <0-100>, "weight": 10, "weighted_score": <calculated>, "explanation": "why"}},
-    "volume": {{"trend": "{vol.get('trend', 'neutral')}", "signal": "bullish/bearish/neutral", "score": <0-100>, "weight": 10, "weighted_score": <calculated>, "explanation": "why"}}
+    "rsi": {{"value": {rsi.get('value', 50)}, "signal": "{rsi.get('signal', 'neutral')}", "score": <0-100>, "weight": 10, "weighted_score": <calculated>, "explanation": "why"}},
+    "macd": {{"value": {{"macd": {macd.get('macd', 0)}, "signal": {macd.get('signal', 0)}, "histogram": {macd.get('histogram', 0)}}}, "signal": "{macd.get('trend', 'neutral')}", "score": <0-100>, "weight": 10, "weighted_score": <calculated>, "explanation": "why"}},
+    "divergence": {{"type": "{divergence.get('type', 'none')}", "signal": "{divergence.get('signal', 'neutral')}", "indicator": "{divergence.get('indicator', 'none')}", "strength": "{divergence.get('strength', 'none')}", "score": <0-100>, "weight": 8, "weighted_score": <calculated>, "explanation": "why"}},
+    "ema_alignment": {{"value": "{ema.get('alignment', 'mixed')}", "signal": "bullish/bearish/neutral", "score": <0-100>, "weight": 10, "weighted_score": <calculated>, "explanation": "why"}},
+    "price_vs_ema": {{"value": "{ema.get('price_vs_ema', 'mixed')}", "signal": "bullish/bearish/neutral", "score": <0-100>, "weight": 8, "weighted_score": <calculated>, "explanation": "why"}},
+    "support_resistance": {{"nearest_support": <price>, "nearest_resistance": <price>, "signal": "bullish/bearish/neutral", "score": <0-100>, "weight": 20, "weighted_score": <calculated>, "explanation": "why"}},
+    "fibonacci": {{"key_level": "0.618", "price_at_level": <price>, "signal": "bullish/bearish/neutral", "score": <0-100>, "weight": 8, "weighted_score": <calculated>, "explanation": "why"}},
+    "bollinger": {{"position": "{bb.get('position', 'middle')}", "signal": "bullish/bearish/neutral", "score": <0-100>, "weight": 8, "weighted_score": <calculated>, "explanation": "why"}},
+    "volume": {{"trend": "{vol.get('trend', 'neutral')}", "signal": "bullish/bearish/neutral", "score": <0-100>, "weight": 3, "weighted_score": <calculated>, "explanation": "why"}}
   }},
   "confluence_score": <sum of weighted_scores>,
   "confluence_breakdown": {{
+    "Chart Pattern": <weighted_score>,
+    "S/R Levels": <weighted_score>,
+    "Divergence": <weighted_score>,
     "RSI": <weighted_score>,
     "MACD": <weighted_score>,
     "EMA Alignment": <weighted_score>,
     "Price vs EMA": <weighted_score>,
-    "S/R Levels": <weighted_score>,
     "Fibonacci": <weighted_score>,
     "Bollinger": <weighted_score>,
     "Volume": <weighted_score>
@@ -1229,11 +1408,13 @@ CRITICAL RULES:
 1. FIRST read the price scale from the screenshot's Y-axis (right side) - this is CRITICAL for accurate line placement
 2. Use THOSE screenshot prices for price_scale_from_screenshot (max_price, min_price)
 3. Calculate Y coordinates using: Y = 50 + ((screenshot_max - P) / (screenshot_max - screenshot_min)) × {img_height - 150}
-4. Use the EXACT indicator values provided above for analysis
-5. confluence_score MUST equal sum of all weighted_scores
-6. Only recommend trade if confluence_score ≥ 60
-7. For SPOT trading, prefer LONG setups
-8. Return ONLY valid JSON, no markdown code blocks"""
+4. CAREFULLY examine the chart for patterns - this is worth 15% of confluence score
+5. Use the EXACT indicator values provided above for analysis
+6. Divergence detection: If bullish divergence detected, give high score (80-100). If bearish, low score (0-20). If none, score 50.
+7. confluence_score MUST equal sum of all weighted_scores (Chart Pattern + S/R + Divergence + RSI + MACD + EMA Alignment + Price vs EMA + Fibonacci + Bollinger + Volume = 100%)
+8. Only recommend trade if confluence_score ≥ 60
+9. For SPOT trading, prefer LONG setups
+10. Return ONLY valid JSON, no markdown code blocks"""
 
     return prompt
 
@@ -1679,6 +1860,7 @@ async def analyze_chart(
             "current_price": price_data["current_price"],
             "binance_data": price_data,
             "calculated_indicators": indicators,
+            "chart_pattern": analysis_data.get("chart_pattern", {}),
             "indicators": analysis_data.get("indicators", {}),
             "trade_setup": analysis_data.get("trade_setup", {}),
             "support_levels": analysis_data.get("support_levels", []),
@@ -1741,77 +1923,95 @@ def generate_fallback_analysis(indicators: Dict, price_data: Dict, price_scale: 
     vol = indicators.get("volume", {})
     bb = indicators.get("bollinger", {})
     
-    # Simple confluence scoring
+    # Simple confluence scoring with updated weights
     score = 50  # Start neutral
     breakdown = {}
     
-    # RSI
+    # Chart Pattern (15%) - No pattern in fallback
+    pattern_score = 50
+    breakdown["Chart Pattern"] = round(pattern_score * 0.15, 1)
+    score += (pattern_score - 50) * 0.15
+    
+    # S/R Levels (20% - increased)
+    sr_score = 60 if supports else 50
+    breakdown["S/R Levels"] = round(sr_score * 0.20, 1)
+    score += (sr_score - 50) * 0.20
+    
+    # Divergence (8%)
+    divergence = indicators.get("divergence", {})
+    if divergence.get("signal") == "bullish":
+        div_score = 85
+    elif divergence.get("signal") == "bearish":
+        div_score = 15
+    else:
+        div_score = 50
+    breakdown["Divergence"] = round(div_score * 0.08, 1)
+    score += (div_score - 50) * 0.08
+    
+    # RSI (10% - reduced)
     if rsi.get("signal") == "oversold":
         rsi_score = 80
     elif rsi.get("signal") == "overbought":
         rsi_score = 20
     else:
         rsi_score = 50
-    breakdown["RSI"] = round(rsi_score * 0.15, 1)
-    score += (rsi_score - 50) * 0.15
+    breakdown["RSI"] = round(rsi_score * 0.10, 1)
+    score += (rsi_score - 50) * 0.10
     
-    # MACD
+    # MACD (10% - reduced)
     if macd.get("trend") == "bullish":
         macd_score = 75
     elif macd.get("trend") == "bearish":
         macd_score = 25
     else:
         macd_score = 50
-    breakdown["MACD"] = round(macd_score * 0.15, 1)
-    score += (macd_score - 50) * 0.15
+    breakdown["MACD"] = round(macd_score * 0.10, 1)
+    score += (macd_score - 50) * 0.10
     
-    # EMA
+    # EMA Alignment (10% - reduced)
     if ema.get("alignment") == "bullish":
         ema_score = 80
     elif ema.get("alignment") == "bearish":
         ema_score = 20
     else:
         ema_score = 50
-    breakdown["EMA Alignment"] = round(ema_score * 0.15, 1)
-    score += (ema_score - 50) * 0.15
+    breakdown["EMA Alignment"] = round(ema_score * 0.10, 1)
+    score += (ema_score - 50) * 0.10
     
-    # Price vs EMA
+    # Price vs EMA (8%)
     if ema.get("price_vs_ema") == "above_all":
         pve_score = 75
     elif ema.get("price_vs_ema") == "below_all":
         pve_score = 25
     else:
         pve_score = 50
-    breakdown["Price vs EMA"] = round(pve_score * 0.1, 1)
-    score += (pve_score - 50) * 0.1
+    breakdown["Price vs EMA"] = round(pve_score * 0.08, 1)
+    score += (pve_score - 50) * 0.08
     
-    # S/R
-    sr_score = 60 if supports else 50
-    breakdown["S/R Levels"] = round(sr_score * 0.15, 1)
-    score += (sr_score - 50) * 0.15
+    # Fibonacci (8%)
+    fib_score = 55
+    breakdown["Fibonacci"] = round(fib_score * 0.08, 1)
+    score += (fib_score - 50) * 0.08
     
-    # Volume
-    if vol.get("trend") == "bullish":
-        vol_score = 70
-    elif vol.get("trend") == "bearish":
-        vol_score = 30
-    else:
-        vol_score = 50
-    breakdown["Volume"] = round(vol_score * 0.1, 1)
-    score += (vol_score - 50) * 0.1
-    
-    # Bollinger
+    # Bollinger (8%)
     if bb.get("position") == "lower_band":
         bb_score = 75
     elif bb.get("position") == "upper_band":
         bb_score = 25
     else:
         bb_score = 50
-    breakdown["Bollinger"] = round(bb_score * 0.1, 1)
-    score += (bb_score - 50) * 0.1
+    breakdown["Bollinger"] = round(bb_score * 0.08, 1)
+    score += (bb_score - 50) * 0.08
     
-    # Fibonacci
-    breakdown["Fibonacci"] = 5.0
+    # Volume (3%)
+    if vol.get("trend") == "bullish":
+        vol_score = 70
+    elif vol.get("trend") == "bearish":
+        vol_score = 30
+    else:
+        vol_score = 50
+    breakdown["Volume"] = round(vol_score * 0.03, 1)
+    score += (vol_score - 50) * 0.03
     
     confluence_score = max(0, min(100, round(score, 1)))
     
