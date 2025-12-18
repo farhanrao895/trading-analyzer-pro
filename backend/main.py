@@ -61,9 +61,12 @@ for model_name in ['gemini-2.5-flash', 'gemini-2.0-flash-exp', 'gemini-1.5-flash
 # CONSTANTS
 # ============================================================
 
-# Use Bybit API (not blocked like Binance)
+# API URLs - CoinGecko primary (not blocked), fallbacks for redundancy
+COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
+OKX_BASE_URL = "https://www.okx.com/api/v5/market"
+KRAKEN_BASE_URL = "https://api.kraken.com/0/public"
 BYBIT_BASE_URL = "https://api.bybit.com/v5/market"
-BINANCE_BASE_URL = "https://api.binance.com/api/v3"  # Fallback only
+BINANCE_BASE_URL = "https://api.binance.com/api/v3"  # Last resort fallback
 
 POPULAR_PAIRS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
@@ -73,25 +76,268 @@ POPULAR_PAIRS = [
     "PEPEUSDT", "SHIBUSDT", "WIFUSDT", "BONKUSDT", "INJUSDT"
 ]
 
+# Symbol mapping: Trading pair -> CoinGecko ID
+SYMBOL_TO_COINGECKO = {
+    "BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "BNBUSDT": "binancecoin",
+    "SOLUSDT": "solana", "XRPUSDT": "ripple", "ADAUSDT": "cardano",
+    "DOGEUSDT": "dogecoin", "AVAXUSDT": "avalanche-2", "DOTUSDT": "polkadot",
+    "MATICUSDT": "matic-network", "LINKUSDT": "chainlink", "ATOMUSDT": "cosmos",
+    "LTCUSDT": "litecoin", "UNIUSDT": "uniswap", "NEARUSDT": "near",
+    "APTUSDT": "aptos", "OPUSDT": "optimism", "ARBUSDT": "arbitrum",
+    "SUIUSDT": "sui", "SEIUSDT": "sei-network", "PEPEUSDT": "pepe",
+    "SHIBUSDT": "shiba-inu", "WIFUSDT": "dogwifcoin", "BONKUSDT": "bonk",
+    "INJUSDT": "injective-protocol", "TRXUSDT": "tron", "TONUSDT": "the-open-network",
+    "AAVEUSDT": "aave", "MKRUSDT": "maker", "RNDRUSDT": "render-token"
+}
+
+# Symbol mapping for OKX: BTCUSDT -> BTC-USDT
+def symbol_to_okx(symbol: str) -> str:
+    """Convert BTCUSDT -> BTC-USDT for OKX"""
+    s = symbol.upper()
+    if s.endswith("USDT"):
+        return f"{s[:-4]}-USDT"
+    return s
+
+# Symbol mapping for Kraken: BTCUSDT -> XXBTZUSD
+SYMBOL_TO_KRAKEN = {
+    "BTCUSDT": "XXBTZUSD", "ETHUSDT": "XETHZUSD", "SOLUSDT": "SOLUSD",
+    "XRPUSDT": "XXRPZUSD", "ADAUSDT": "ADAUSD", "DOGEUSDT": "XDGUSD",
+    "DOTUSDT": "DOTUSD", "LINKUSDT": "LINKUSD", "LTCUSDT": "XLTCZUSD",
+    "UNIUSDT": "UNIUSD", "ATOMUSDT": "ATOMUSD", "AVAXUSDT": "AVAXUSD"
+}
+
 TIMEFRAMES = {
     "1m": "1 Minute", "5m": "5 Minutes", "15m": "15 Minutes",
     "30m": "30 Minutes", "1h": "1 Hour", "4h": "4 Hours",
     "1d": "1 Day", "1w": "1 Week"
 }
 
+# Map intervals to CoinGecko days parameter
+INTERVAL_TO_DAYS = {
+    "1m": 1, "5m": 1, "15m": 1, "30m": 1,
+    "1h": 1, "4h": 1, "1d": 1, "1w": 7
+}
+
+# Map intervals to Bybit format
+INTERVAL_MAP = {
+    "1m": "1", "5m": "5", "15m": "15", "30m": "30",
+    "1h": "60", "4h": "240", "1d": "D", "1w": "W"
+}
+
 # ============================================================
-# PART 1: BINANCE API INTEGRATION
+# PART 1: MULTI-SOURCE API INTEGRATION
 # ============================================================
 
+async def fetch_coingecko(endpoint: str, params: dict = None) -> Optional[Dict]:
+    """Fetch from CoinGecko API (primary - not blocked)"""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            url = f"{COINGECKO_BASE_URL}/{endpoint}"
+            resp = await client.get(url, params=params)
+            if resp.status_code == 200:
+                return resp.json()
+            print(f"CoinGecko API error: {resp.status_code} - {resp.text[:200]}")
+        except Exception as e:
+            print(f"CoinGecko fetch error: {e}")
+    return None
+
+async def fetch_coingecko_price(symbol: str) -> Optional[Dict]:
+    """Get price data from CoinGecko for a symbol"""
+    coin_id = SYMBOL_TO_COINGECKO.get(symbol.upper())
+    if not coin_id:
+        # Try to extract base from symbol (e.g., BTCUSDT -> btc)
+        base = symbol.upper().replace("USDT", "").replace("USD", "").lower()
+        coin_id = base
+    
+    data = await fetch_coingecko("simple/price", {
+        "ids": coin_id,
+        "vs_currencies": "usd",
+        "include_24hr_vol": "true",
+        "include_24hr_change": "true",
+        "include_last_updated_at": "true"
+    })
+    
+    if data and coin_id in data:
+        coin_data = data[coin_id]
+        return {
+            "symbol": symbol.upper(),
+            "current_price": coin_data.get("usd", 0),
+            "price_change_pct": coin_data.get("usd_24h_change", 0),
+            "volume_24h": coin_data.get("usd_24h_vol", 0),
+        }
+    return None
+
+async def fetch_coingecko_market(symbol: str) -> Optional[Dict]:
+    """Get detailed market data from CoinGecko"""
+    coin_id = SYMBOL_TO_COINGECKO.get(symbol.upper())
+    if not coin_id:
+        base = symbol.upper().replace("USDT", "").replace("USD", "").lower()
+        coin_id = base
+    
+    data = await fetch_coingecko(f"coins/{coin_id}", {
+        "localization": "false",
+        "tickers": "false",
+        "community_data": "false",
+        "developer_data": "false"
+    })
+    
+    if data and "market_data" in data:
+        md = data["market_data"]
+        return {
+            "symbol": symbol.upper(),
+            "current_price": md.get("current_price", {}).get("usd", 0),
+            "price_change_24h": md.get("price_change_24h", 0),
+            "price_change_pct": md.get("price_change_percentage_24h", 0),
+            "high_24h": md.get("high_24h", {}).get("usd", 0),
+            "low_24h": md.get("low_24h", {}).get("usd", 0),
+            "volume_24h": md.get("total_volume", {}).get("usd", 0),
+            "market_cap": md.get("market_cap", {}).get("usd", 0)
+        }
+    return None
+
+async def fetch_coingecko_ohlc(symbol: str, days: int = 1) -> Optional[List]:
+    """Get OHLC data from CoinGecko"""
+    coin_id = SYMBOL_TO_COINGECKO.get(symbol.upper())
+    if not coin_id:
+        base = symbol.upper().replace("USDT", "").replace("USD", "").lower()
+        coin_id = base
+    
+    data = await fetch_coingecko(f"coins/{coin_id}/ohlc", {
+        "vs_currency": "usd",
+        "days": str(days)
+    })
+    
+    if data and isinstance(data, list):
+        # CoinGecko returns: [[timestamp, open, high, low, close], ...]
+        klines = []
+        for candle in data:
+            if len(candle) >= 5:
+                klines.append({
+                    "open_time": candle[0],
+                    "open": candle[1],
+                    "high": candle[2],
+                    "low": candle[3],
+                    "close": candle[4],
+                    "volume": 0,  # CoinGecko OHLC doesn't include volume
+                    "close_time": candle[0] + 3600000  # Estimate
+                })
+        return klines
+    return None
+
+async def fetch_okx(endpoint: str, params: dict = None) -> Optional[Dict]:
+    """Fetch from OKX API (fallback 1)"""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            url = f"{OKX_BASE_URL}/{endpoint}"
+            resp = await client.get(url, params=params)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("code") == "0":  # OKX success code
+                    return data.get("data")
+            print(f"OKX API error: {resp.status_code} - {resp.text[:200]}")
+        except Exception as e:
+            print(f"OKX fetch error: {e}")
+    return None
+
+async def fetch_okx_price(symbol: str) -> Optional[Dict]:
+    """Get price from OKX"""
+    okx_symbol = symbol_to_okx(symbol)
+    data = await fetch_okx("ticker", {"instId": okx_symbol})
+    if data and len(data) > 0:
+        ticker = data[0]
+        last = float(ticker.get("last", 0))
+        open_24h = float(ticker.get("open24h", last))
+        return {
+            "symbol": symbol.upper(),
+            "current_price": last,
+            "price_change_24h": last - open_24h,
+            "price_change_pct": ((last - open_24h) / open_24h * 100) if open_24h else 0,
+            "high_24h": float(ticker.get("high24h", last)),
+            "low_24h": float(ticker.get("low24h", last)),
+            "volume_24h": float(ticker.get("vol24h", 0)),
+            "quote_volume": float(ticker.get("volCcy24h", 0))
+        }
+    return None
+
+async def fetch_okx_klines(symbol: str, interval: str, limit: int = 100) -> Optional[List]:
+    """Get klines from OKX"""
+    okx_symbol = symbol_to_okx(symbol)
+    # OKX interval mapping
+    okx_interval_map = {
+        "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
+        "1h": "1H", "4h": "4H", "1d": "1D", "1w": "1W"
+    }
+    okx_bar = okx_interval_map.get(interval.lower(), "1H")
+    
+    data = await fetch_okx("candles", {
+        "instId": okx_symbol,
+        "bar": okx_bar,
+        "limit": str(limit)
+    })
+    
+    if data:
+        klines = []
+        for k in reversed(data):  # OKX returns newest first
+            klines.append({
+                "open_time": int(k[0]),
+                "open": float(k[1]),
+                "high": float(k[2]),
+                "low": float(k[3]),
+                "close": float(k[4]),
+                "volume": float(k[5]),
+                "close_time": int(k[0]) + 3600000,
+                "quote_volume": float(k[6]) if len(k) > 6 else 0
+            })
+        return klines
+    return None
+
+async def fetch_kraken(endpoint: str, params: dict = None) -> Optional[Dict]:
+    """Fetch from Kraken API (fallback 2)"""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            url = f"{KRAKEN_BASE_URL}/{endpoint}"
+            resp = await client.get(url, params=params)
+            if resp.status_code == 200:
+                data = resp.json()
+                if not data.get("error"):
+                    return data.get("result")
+            print(f"Kraken API error: {resp.status_code} - {resp.text[:200]}")
+        except Exception as e:
+            print(f"Kraken fetch error: {e}")
+    return None
+
+async def fetch_kraken_price(symbol: str) -> Optional[Dict]:
+    """Get price from Kraken"""
+    kraken_pair = SYMBOL_TO_KRAKEN.get(symbol.upper())
+    if not kraken_pair:
+        return None
+    
+    data = await fetch_kraken("Ticker", {"pair": kraken_pair})
+    if data and kraken_pair in data:
+        ticker = data[kraken_pair]
+        last = float(ticker.get("c", [0])[0])
+        open_24h = float(ticker.get("o", last))
+        return {
+            "symbol": symbol.upper(),
+            "current_price": last,
+            "price_change_24h": last - open_24h,
+            "price_change_pct": ((last - open_24h) / open_24h * 100) if open_24h else 0,
+            "high_24h": float(ticker.get("h", [0, last])[1]),
+            "low_24h": float(ticker.get("l", [0, last])[1]),
+            "volume_24h": float(ticker.get("v", [0, 0])[1]),
+            "quote_volume": 0
+        }
+    return None
+
 async def fetch_bybit(endpoint: str, params: dict = None) -> Optional[Dict]:
-    """Fetch from Bybit API (not blocked like Binance)"""
+    """Fetch from Bybit API (fallback 3)"""
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             url = f"{BYBIT_BASE_URL}/{endpoint}"
             resp = await client.get(url, params=params)
             if resp.status_code == 200:
                 data = resp.json()
-                if data.get("retCode") == 0:  # Bybit success code
+                if data.get("retCode") == 0:
                     return data.get("result")
             print(f"Bybit API error: {resp.status_code} - {resp.text[:200]}")
         except Exception as e:
@@ -99,7 +345,7 @@ async def fetch_bybit(endpoint: str, params: dict = None) -> Optional[Dict]:
     return None
 
 async def fetch_binance(endpoint: str, params: dict = None) -> Optional[Dict]:
-    """Generic Binance API fetcher (fallback)"""
+    """Fetch from Binance API (last resort fallback)"""
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             url = f"{BINANCE_BASE_URL}/{endpoint}"
@@ -127,9 +373,69 @@ async def get_symbols():
 
 @app.get("/api/price/{symbol}")
 async def get_price(symbol: str):
-    """GET /api/price/{symbol} - Real-time price + 24h stats"""
-    data = await fetch_binance("ticker/24hr", {"symbol": symbol.upper()})
+    """GET /api/price/{symbol} - Real-time price with multi-source fallback"""
+    symbol = symbol.upper()
+    
+    # 1. Try CoinGecko (primary - not blocked)
+    print(f"Fetching price for {symbol} from CoinGecko...")
+    data = await fetch_coingecko_market(symbol)
     if data:
+        print(f"Got price from CoinGecko: {data.get('current_price')}")
+        return {
+            "symbol": symbol,
+            "current_price": data.get("current_price", 0),
+            "price_change_24h": data.get("price_change_24h", 0),
+            "price_change_pct": data.get("price_change_pct", 0),
+            "high_24h": data.get("high_24h", 0),
+            "low_24h": data.get("low_24h", 0),
+            "volume_24h": data.get("volume_24h", 0),
+            "quote_volume": data.get("volume_24h", 0),
+            "open_price": data.get("current_price", 0) - data.get("price_change_24h", 0),
+            "weighted_avg_price": data.get("current_price", 0),
+            "source": "coingecko"
+        }
+    
+    # 2. Try OKX (fallback 1)
+    print(f"CoinGecko failed, trying OKX for {symbol}...")
+    data = await fetch_okx_price(symbol)
+    if data:
+        print(f"Got price from OKX: {data.get('current_price')}")
+        data["source"] = "okx"
+        return data
+    
+    # 3. Try Kraken (fallback 2)
+    print(f"OKX failed, trying Kraken for {symbol}...")
+    data = await fetch_kraken_price(symbol)
+    if data:
+        print(f"Got price from Kraken: {data.get('current_price')}")
+        data["source"] = "kraken"
+        return data
+    
+    # 4. Try Bybit (fallback 3)
+    print(f"Kraken failed, trying Bybit for {symbol}...")
+    bybit_data = await fetch_bybit("tickers", {"category": "spot", "symbol": symbol})
+    if bybit_data and bybit_data.get("list"):
+        ticker = bybit_data["list"][0]
+        print(f"Got price from Bybit: {ticker.get('lastPrice')}")
+        return {
+            "symbol": symbol,
+            "current_price": float(ticker.get("lastPrice", 0)),
+            "price_change_24h": float(ticker.get("lastPrice", 0)) - float(ticker.get("prevPrice24h", ticker.get("lastPrice", 0))),
+            "price_change_pct": float(ticker.get("price24hPcnt", 0)) * 100,
+            "high_24h": float(ticker.get("highPrice24h", 0)),
+            "low_24h": float(ticker.get("lowPrice24h", 0)),
+            "volume_24h": float(ticker.get("volume24h", 0)),
+            "quote_volume": float(ticker.get("turnover24h", 0)),
+            "open_price": float(ticker.get("prevPrice24h", 0)),
+            "weighted_avg_price": float(ticker.get("lastPrice", 0)),
+            "source": "bybit"
+        }
+    
+    # 5. Try Binance (last resort)
+    print(f"Bybit failed, trying Binance for {symbol} (last resort)...")
+    data = await fetch_binance("ticker/24hr", {"symbol": symbol})
+    if data:
+        print(f"Got price from Binance: {data.get('lastPrice')}")
         return {
             "symbol": data["symbol"],
             "current_price": float(data["lastPrice"]),
@@ -140,27 +446,45 @@ async def get_price(symbol: str):
             "volume_24h": float(data["volume"]),
             "quote_volume": float(data["quoteVolume"]),
             "open_price": float(data["openPrice"]),
-            "weighted_avg_price": float(data["weightedAvgPrice"])
+            "weighted_avg_price": float(data["weightedAvgPrice"]),
+            "source": "binance"
         }
-    raise HTTPException(status_code=404, detail=f"Symbol {symbol} not found")
+    
+    raise HTTPException(status_code=404, detail=f"Could not fetch price for {symbol} from any source")
 
 
 @app.get("/api/klines/{symbol}/{interval}")
 async def get_klines(symbol: str, interval: str, limit: int = Query(default=500, le=1000)):
-    """GET /api/klines/{symbol}/{interval} - Historical candlestick data from Bybit"""
+    """GET /api/klines/{symbol}/{interval} - Historical candlestick data with multi-source fallback"""
     symbol = symbol.upper()
-    bybit_interval = INTERVAL_MAP.get(interval.lower(), interval)
     
-    # Try Bybit first
+    # 1. Try OKX first (has better kline data than CoinGecko)
+    print(f"Fetching klines for {symbol} {interval} from OKX...")
+    klines = await fetch_okx_klines(symbol, interval, min(limit, 100))
+    if klines and len(klines) > 0:
+        print(f"Got {len(klines)} klines from OKX")
+        return {"symbol": symbol, "interval": interval, "klines": klines, "source": "okx"}
+    
+    # 2. Try CoinGecko OHLC (limited intervals)
+    print(f"OKX failed, trying CoinGecko OHLC for {symbol}...")
+    days = INTERVAL_TO_DAYS.get(interval.lower(), 1)
+    cg_klines = await fetch_coingecko_ohlc(symbol, days)
+    if cg_klines and len(cg_klines) > 0:
+        print(f"Got {len(cg_klines)} klines from CoinGecko")
+        return {"symbol": symbol, "interval": interval, "klines": cg_klines, "source": "coingecko"}
+    
+    # 3. Try Bybit
+    print(f"CoinGecko failed, trying Bybit for {symbol}...")
+    bybit_interval = INTERVAL_MAP.get(interval.lower(), interval)
     data = await fetch_bybit("kline", {
         "category": "spot",
         "symbol": symbol,
         "interval": bybit_interval,
-        "limit": min(limit, 200)  # Bybit max is 200
+        "limit": min(limit, 200)
     })
     if data and data.get("list"):
         klines = []
-        for k in reversed(data["list"]):  # Bybit returns newest first, reverse for chronological
+        for k in reversed(data["list"]):
             klines.append({
                 "open_time": int(k[0]),
                 "open": float(k[1]),
@@ -172,9 +496,11 @@ async def get_klines(symbol: str, interval: str, limit: int = Query(default=500,
                 "quote_volume": float(k[6]) if len(k) > 6 else float(k[5]) * float(k[4]),
                 "trades": 0
             })
-        return {"symbol": symbol, "interval": interval, "klines": klines}
+        print(f"Got {len(klines)} klines from Bybit")
+        return {"symbol": symbol, "interval": interval, "klines": klines, "source": "bybit"}
     
-    # Fallback to Binance
+    # 4. Try Binance (last resort)
+    print(f"Bybit failed, trying Binance for {symbol} (last resort)...")
     data = await fetch_binance("klines", {
         "symbol": symbol,
         "interval": interval,
@@ -194,59 +520,83 @@ async def get_klines(symbol: str, interval: str, limit: int = Query(default=500,
                 "quote_volume": float(k[7]),
                 "trades": k[8]
             })
-        return {"symbol": symbol, "interval": interval, "klines": klines}
-    raise HTTPException(status_code=404, detail=f"Failed to fetch klines for {symbol}")
+        print(f"Got {len(klines)} klines from Binance")
+        return {"symbol": symbol, "interval": interval, "klines": klines, "source": "binance"}
+    
+    raise HTTPException(status_code=404, detail=f"Could not fetch klines for {symbol} from any source")
 
 
 @app.get("/api/depth/{symbol}")
 async def get_depth(symbol: str, limit: int = Query(default=20, le=100)):
-    """GET /api/depth/{symbol} - Order book depth data from Bybit"""
+    """GET /api/depth/{symbol} - Order book depth data with multi-source fallback"""
     symbol = symbol.upper()
     
-    # Try Bybit first
+    def format_depth_response(bids, asks, source):
+        largest_bid = max(bids, key=lambda x: x["quantity"]) if bids else {"price": 0, "quantity": 0}
+        largest_ask = max(asks, key=lambda x: x["quantity"]) if asks else {"price": 0, "quantity": 0}
+        return {
+            "symbol": symbol,
+            "bids": bids,
+            "asks": asks,
+            "largest_bid_wall": largest_bid,
+            "largest_ask_wall": largest_ask,
+            "bid_depth": sum(b["quantity"] for b in bids),
+            "ask_depth": sum(a["quantity"] for a in asks),
+            "source": source
+        }
+    
+    # 1. Try OKX first (CoinGecko doesn't have order book)
+    print(f"Fetching depth for {symbol} from OKX...")
+    okx_symbol = symbol_to_okx(symbol)
+    data = await fetch_okx("books", {"instId": okx_symbol, "sz": str(limit)})
+    if data and len(data) > 0:
+        book = data[0]
+        bids = [{"price": float(b[0]), "quantity": float(b[1])} for b in book.get("bids", [])]
+        asks = [{"price": float(a[0]), "quantity": float(a[1])} for a in book.get("asks", [])]
+        if bids or asks:
+            print(f"Got depth from OKX: {len(bids)} bids, {len(asks)} asks")
+            return format_depth_response(bids, asks, "okx")
+    
+    # 2. Try Kraken
+    print(f"OKX failed, trying Kraken for {symbol}...")
+    kraken_pair = SYMBOL_TO_KRAKEN.get(symbol)
+    if kraken_pair:
+        data = await fetch_kraken("Depth", {"pair": kraken_pair, "count": str(limit)})
+        if data and kraken_pair in data:
+            book = data[kraken_pair]
+            bids = [{"price": float(b[0]), "quantity": float(b[1])} for b in book.get("bids", [])]
+            asks = [{"price": float(a[0]), "quantity": float(a[1])} for a in book.get("asks", [])]
+            if bids or asks:
+                print(f"Got depth from Kraken: {len(bids)} bids, {len(asks)} asks")
+                return format_depth_response(bids, asks, "kraken")
+    
+    # 3. Try Bybit
+    print(f"Kraken failed, trying Bybit for {symbol}...")
     data = await fetch_bybit("orderbook", {
         "category": "spot",
         "symbol": symbol,
-        "limit": min(limit, 50)  # Bybit max is 50
+        "limit": min(limit, 50)
     })
     if data:
         bids = [{"price": float(b[0]), "quantity": float(b[1])} for b in data.get("b", [])]
         asks = [{"price": float(a[0]), "quantity": float(a[1])} for a in data.get("a", [])]
-        
-        # Find largest walls
-        largest_bid = max(bids, key=lambda x: x["quantity"]) if bids else {"price": 0, "quantity": 0}
-        largest_ask = max(asks, key=lambda x: x["quantity"]) if asks else {"price": 0, "quantity": 0}
-        
-        return {
-            "symbol": symbol,
-            "bids": bids,
-            "asks": asks,
-            "largest_bid_wall": largest_bid,
-            "largest_ask_wall": largest_ask,
-            "bid_depth": sum(b["quantity"] for b in bids),
-            "ask_depth": sum(a["quantity"] for a in asks)
-        }
+        if bids or asks:
+            print(f"Got depth from Bybit: {len(bids)} bids, {len(asks)} asks")
+            return format_depth_response(bids, asks, "bybit")
     
-    # Fallback to Binance
+    # 4. Try Binance (last resort)
+    print(f"Bybit failed, trying Binance for {symbol} (last resort)...")
     data = await fetch_binance("depth", {"symbol": symbol, "limit": limit})
     if data:
         bids = [{"price": float(b[0]), "quantity": float(b[1])} for b in data.get("bids", [])]
         asks = [{"price": float(a[0]), "quantity": float(a[1])} for a in data.get("asks", [])]
-        
-        # Find largest walls
-        largest_bid = max(bids, key=lambda x: x["quantity"]) if bids else {"price": 0, "quantity": 0}
-        largest_ask = max(asks, key=lambda x: x["quantity"]) if asks else {"price": 0, "quantity": 0}
-        
-        return {
-            "symbol": symbol,
-            "bids": bids,
-            "asks": asks,
-            "largest_bid_wall": largest_bid,
-            "largest_ask_wall": largest_ask,
-            "bid_depth": sum(b["quantity"] for b in bids),
-            "ask_depth": sum(a["quantity"] for a in asks)
-        }
-    raise HTTPException(status_code=404, detail=f"Failed to fetch depth for {symbol}")
+        if bids or asks:
+            print(f"Got depth from Binance: {len(bids)} bids, {len(asks)} asks")
+            return format_depth_response(bids, asks, "binance")
+    
+    # Return empty depth if all fail (non-critical)
+    print(f"All depth sources failed for {symbol}, returning empty")
+    return format_depth_response([], [], "none")
 
 
 @app.get("/api/timeframes")
@@ -1064,12 +1414,23 @@ async def analyze_chart(
         
         symbol = symbol.upper()
         
-        # Use provided data (from frontend) or fetch from Bybit
+        # Use provided data (from frontend) or fetch with multi-source fallback
         if price_data_json:
-            # Use data provided by frontend
+            # Use data provided by frontend - handle multiple formats
             price_data_raw = json.loads(price_data_json)
-            # Handle both Bybit and Binance formats
-            if "list" in price_data_raw:  # Bybit format
+            if "current_price" in price_data_raw:
+                # Already in our standard format (CoinGecko/OKX/Kraken from frontend)
+                price_data = {
+                    "symbol": price_data_raw.get("symbol", symbol),
+                    "current_price": float(price_data_raw.get("current_price", 0)),
+                    "price_change_24h": float(price_data_raw.get("price_change_24h", 0)),
+                    "price_change_pct": float(price_data_raw.get("price_change_pct", 0)),
+                    "high_24h": float(price_data_raw.get("high_24h", 0)),
+                    "low_24h": float(price_data_raw.get("low_24h", 0)),
+                    "volume_24h": float(price_data_raw.get("volume_24h", 0)),
+                    "quote_volume": float(price_data_raw.get("quote_volume", 0))
+                }
+            elif "list" in price_data_raw:  # Bybit format
                 ticker = price_data_raw["list"][0]
                 price_data = {
                     "symbol": ticker["symbol"],
@@ -1081,9 +1442,9 @@ async def analyze_chart(
                     "volume_24h": float(ticker.get("volume24h", 0)),
                     "quote_volume": float(ticker.get("turnover24h", 0))
                 }
-            else:  # Binance format
+            elif "lastPrice" in price_data_raw:  # Binance format
                 price_data = {
-                    "symbol": price_data_raw["symbol"],
+                    "symbol": price_data_raw.get("symbol", symbol),
                     "current_price": float(price_data_raw["lastPrice"]),
                     "price_change_24h": float(price_data_raw.get("priceChange", 0)),
                     "price_change_pct": float(price_data_raw.get("priceChangePercent", 0)),
@@ -1092,67 +1453,147 @@ async def analyze_chart(
                     "volume_24h": float(price_data_raw.get("volume", 0)),
                     "quote_volume": float(price_data_raw.get("quoteVolume", 0))
                 }
-        else:
-            # Fetch from Bybit (not blocked)
-            bybit_data = await fetch_bybit("tickers", {"category": "spot", "symbol": symbol})
-            if bybit_data and bybit_data.get("list"):
-                ticker = bybit_data["list"][0]
-                price_data = {
-                    "symbol": ticker["symbol"],
-                    "current_price": float(ticker["lastPrice"]),
-                    "price_change_24h": (float(ticker.get("lastPrice", 0)) - float(ticker.get("prevPrice24h", ticker["lastPrice"]))),
-                    "price_change_pct": float(ticker.get("price24hPcnt", 0)) * 100,
-                    "high_24h": float(ticker.get("highPrice24h", ticker["lastPrice"])),
-                    "low_24h": float(ticker.get("lowPrice24h", ticker["lastPrice"])),
-                    "volume_24h": float(ticker.get("volume24h", 0)),
-                    "quote_volume": float(ticker.get("turnover24h", 0))
-                }
             else:
-                raise HTTPException(status_code=404, detail=f"Failed to fetch price for {symbol}")
+                # Unknown format, extract what we can
+                price_data = {
+                    "symbol": symbol,
+                    "current_price": float(price_data_raw.get("price", price_data_raw.get("usd", 0))),
+                    "price_change_24h": 0,
+                    "price_change_pct": float(price_data_raw.get("usd_24h_change", 0)),
+                    "high_24h": 0,
+                    "low_24h": 0,
+                    "volume_24h": float(price_data_raw.get("usd_24h_vol", 0)),
+                    "quote_volume": 0
+                }
+        else:
+            # Fetch with multi-source fallback (CoinGecko -> OKX -> Kraken -> Bybit -> Binance)
+            print(f"Fetching price for analysis from multi-source fallback...")
+            
+            # Try CoinGecko first
+            price_data = await fetch_coingecko_market(symbol)
+            if not price_data:
+                # Try OKX
+                price_data = await fetch_okx_price(symbol)
+            if not price_data:
+                # Try Kraken
+                price_data = await fetch_kraken_price(symbol)
+            if not price_data:
+                # Try Bybit
+                bybit_data = await fetch_bybit("tickers", {"category": "spot", "symbol": symbol})
+                if bybit_data and bybit_data.get("list"):
+                    ticker = bybit_data["list"][0]
+                    price_data = {
+                        "symbol": ticker["symbol"],
+                        "current_price": float(ticker["lastPrice"]),
+                        "price_change_24h": (float(ticker.get("lastPrice", 0)) - float(ticker.get("prevPrice24h", ticker["lastPrice"]))),
+                        "price_change_pct": float(ticker.get("price24hPcnt", 0)) * 100,
+                        "high_24h": float(ticker.get("highPrice24h", ticker["lastPrice"])),
+                        "low_24h": float(ticker.get("lowPrice24h", ticker["lastPrice"])),
+                        "volume_24h": float(ticker.get("volume24h", 0)),
+                        "quote_volume": float(ticker.get("turnover24h", 0))
+                    }
+            if not price_data:
+                raise HTTPException(status_code=404, detail=f"Failed to fetch price for {symbol} from any source")
         
-        # Use provided klines or fetch
+        # Use provided klines or fetch with multi-source fallback
         if klines_data_json:
             klines_raw = json.loads(klines_data_json)
-            klines = [{
-                "open_time": k[0], "open": float(k[1]), "high": float(k[2]),
-                "low": float(k[3]), "close": float(k[4]), "volume": float(k[5])
-            } for k in klines_raw]
+            # Handle multiple formats
+            if isinstance(klines_raw, list) and len(klines_raw) > 0:
+                if isinstance(klines_raw[0], dict):
+                    # Already in dict format (from CoinGecko or our API)
+                    klines = [{
+                        "open_time": k.get("open_time", 0),
+                        "open": float(k.get("open", 0)),
+                        "high": float(k.get("high", 0)),
+                        "low": float(k.get("low", 0)),
+                        "close": float(k.get("close", 0)),
+                        "volume": float(k.get("volume", 0))
+                    } for k in klines_raw]
+                else:
+                    # Array format (Binance style: [time, o, h, l, c, v, ...])
+                    klines = [{
+                        "open_time": k[0], "open": float(k[1]), "high": float(k[2]),
+                        "low": float(k[3]), "close": float(k[4]), "volume": float(k[5])
+                    } for k in klines_raw]
+            else:
+                klines = []
         else:
-            klines_raw = await fetch_binance("klines", {"symbol": symbol, "interval": timeframe, "limit": 500})
-            if not klines_raw:
-                raise HTTPException(status_code=404, detail=f"Failed to fetch klines for {symbol}")
-            klines = [{
-                "open_time": k[0], "open": float(k[1]), "high": float(k[2]),
-                "low": float(k[3]), "close": float(k[4]), "volume": float(k[5])
-            } for k in klines_raw]
+            # Fetch with multi-source fallback (OKX -> CoinGecko -> Bybit -> Binance)
+            print(f"Fetching klines for analysis from multi-source fallback...")
+            
+            klines = await fetch_okx_klines(symbol, timeframe, 100)
+            if not klines:
+                days = INTERVAL_TO_DAYS.get(timeframe.lower(), 1)
+                klines = await fetch_coingecko_ohlc(symbol, days)
+            if not klines:
+                # Try Bybit
+                bybit_interval = INTERVAL_MAP.get(timeframe.lower(), timeframe)
+                bybit_data = await fetch_bybit("kline", {
+                    "category": "spot",
+                    "symbol": symbol,
+                    "interval": bybit_interval,
+                    "limit": 200
+                })
+                if bybit_data and bybit_data.get("list"):
+                    klines = []
+                    for k in reversed(bybit_data["list"]):
+                        klines.append({
+                            "open_time": int(k[0]),
+                            "open": float(k[1]),
+                            "high": float(k[2]),
+                            "low": float(k[3]),
+                            "close": float(k[4]),
+                            "volume": float(k[5])
+                        })
+            if not klines:
+                raise HTTPException(status_code=404, detail=f"Failed to fetch klines for {symbol} from any source")
         
-        # Use provided depth or fetch from Bybit
+        # Use provided depth or fetch with multi-source fallback
+        depth_data = {"largest_bid_wall": {"price": 0, "quantity": 0}, "largest_ask_wall": {"price": 0, "quantity": 0}}
         if depth_data_json:
             depth_raw = json.loads(depth_data_json)
-            depth_data = {"largest_bid_wall": {"price": 0, "quantity": 0}, "largest_ask_wall": {"price": 0, "quantity": 0}}
             if depth_raw:
-                # Handle both Bybit (b/a) and Binance (bids/asks) formats
-                bids = [{"price": float(b[0]), "quantity": float(b[1])} for b in depth_raw.get("bids", depth_raw.get("b", []))]
-                asks = [{"price": float(a[0]), "quantity": float(a[1])} for a in depth_raw.get("asks", depth_raw.get("a", []))]
+                # Handle multiple formats (Bybit b/a, Binance bids/asks, our format)
+                bids_raw = depth_raw.get("bids", depth_raw.get("b", []))
+                asks_raw = depth_raw.get("asks", depth_raw.get("a", []))
+                bids = [{"price": float(b[0] if isinstance(b, list) else b.get("price", 0)), 
+                         "quantity": float(b[1] if isinstance(b, list) else b.get("quantity", 0))} for b in bids_raw]
+                asks = [{"price": float(a[0] if isinstance(a, list) else a.get("price", 0)), 
+                         "quantity": float(a[1] if isinstance(a, list) else a.get("quantity", 0))} for a in asks_raw]
                 if bids:
                     depth_data["largest_bid_wall"] = max(bids, key=lambda x: x["quantity"])
                 if asks:
                     depth_data["largest_ask_wall"] = max(asks, key=lambda x: x["quantity"])
         else:
-            # Fetch from Bybit
-            bybit_data = await fetch_bybit("orderbook", {
-                "category": "spot",
-                "symbol": symbol,
-                "limit": 20
-            })
-            depth_data = {"largest_bid_wall": {"price": 0, "quantity": 0}, "largest_ask_wall": {"price": 0, "quantity": 0}}
-            if bybit_data:
-                bids = [{"price": float(b[0]), "quantity": float(b[1])} for b in bybit_data.get("b", [])]
-                asks = [{"price": float(a[0]), "quantity": float(a[1])} for a in bybit_data.get("a", [])]
+            # Fetch with multi-source fallback (OKX -> Kraken -> Bybit)
+            print(f"Fetching depth for analysis from multi-source fallback...")
+            
+            # Try OKX
+            okx_symbol = symbol_to_okx(symbol)
+            okx_data = await fetch_okx("books", {"instId": okx_symbol, "sz": "20"})
+            if okx_data and len(okx_data) > 0:
+                book = okx_data[0]
+                bids = [{"price": float(b[0]), "quantity": float(b[1])} for b in book.get("bids", [])]
+                asks = [{"price": float(a[0]), "quantity": float(a[1])} for a in book.get("asks", [])]
                 if bids:
                     depth_data["largest_bid_wall"] = max(bids, key=lambda x: x["quantity"])
                 if asks:
                     depth_data["largest_ask_wall"] = max(asks, key=lambda x: x["quantity"])
+            else:
+                # Try Bybit
+                bybit_data = await fetch_bybit("orderbook", {
+                    "category": "spot",
+                    "symbol": symbol,
+                    "limit": 20
+                })
+                if bybit_data:
+                    bids = [{"price": float(b[0]), "quantity": float(b[1])} for b in bybit_data.get("b", [])]
+                    asks = [{"price": float(a[0]), "quantity": float(a[1])} for a in bybit_data.get("a", [])]
+                    if bids:
+                        depth_data["largest_bid_wall"] = max(bids, key=lambda x: x["quantity"])
+                    if asks:
+                        depth_data["largest_ask_wall"] = max(asks, key=lambda x: x["quantity"])
         
         # Calculate indicators
         indicators = calculate_all_indicators(klines)
