@@ -1299,8 +1299,11 @@ def draw_annotations(image_bytes: bytes, analysis_data: Dict, price_scale: Dict,
         label_width = text_width + padding * 2
         label_height = text_height + padding * 2
         
-        x = width - label_width - 10
-        y = max(label_height + 5, min(y + offset, height - 5))
+        # Ensure all coordinates are integers
+        x = int(width - label_width - 10)
+        y = int(max(label_height + 5, min(int(y) + int(offset), height - 5)))
+        label_width = int(label_width)
+        label_height = int(label_height)
         
         # Background
         cv2.rectangle(img, (x, y - label_height), (x + label_width, y), color, -1)
@@ -1324,7 +1327,7 @@ def draw_annotations(image_bytes: bytes, analysis_data: Dict, price_scale: Dict,
     for support in analysis_data.get("support_levels", []):
         price = support.get("price", 0)
         if price > 0:
-            y = support.get("y") or get_y(price)
+            y = int(support.get("y") or get_y(price))
             if 70 < y < height - 80:
                 draw_dashed_line((0, y), (width - 170, y), colors["support"], 2)
                 safe_y = get_safe_y(y)
@@ -1334,7 +1337,7 @@ def draw_annotations(image_bytes: bytes, analysis_data: Dict, price_scale: Dict,
     for resistance in analysis_data.get("resistance_levels", []):
         price = resistance.get("price", 0)
         if price > 0:
-            y = resistance.get("y") or get_y(price)
+            y = int(resistance.get("y") or get_y(price))
             if 70 < y < height - 80:
                 draw_dashed_line((0, y), (width - 170, y), colors["resistance"], 2)
                 safe_y = get_safe_y(y)
@@ -1347,7 +1350,7 @@ def draw_annotations(image_bytes: bytes, analysis_data: Dict, price_scale: Dict,
     entry = trade_setup.get("entry", {})
     if entry.get("price"):
         price = entry["price"]
-        y = entry.get("y") or get_y(price)
+        y = int(entry.get("y") or get_y(price))
         if 70 < y < height - 80:
             draw_dashed_line((0, y), (width - 170, y), colors["entry"], 2)
             # Circle marker
@@ -1360,7 +1363,7 @@ def draw_annotations(image_bytes: bytes, analysis_data: Dict, price_scale: Dict,
     sl = trade_setup.get("stop_loss", {})
     if sl.get("price"):
         price = sl["price"]
-        y = sl.get("y") or get_y(price)
+        y = int(sl.get("y") or get_y(price))
         if 70 < y < height - 80:
             draw_dashed_line((0, y), (width - 170, y), colors["stop_loss"], 2)
             # X marker
@@ -1374,7 +1377,7 @@ def draw_annotations(image_bytes: bytes, analysis_data: Dict, price_scale: Dict,
         tp = trade_setup.get(tp_key, {})
         if tp.get("price"):
             price = tp["price"]
-            y = tp.get("y") or get_y(price)
+            y = int(tp.get("y") or get_y(price))
             if 70 < y < height - 80:
                 color = colors[tp_key]
                 draw_dashed_line((0, y), (width - 170, y), color, 2)
