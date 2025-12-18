@@ -1467,9 +1467,8 @@ def calculate_long_trade_setup(
     # 2) ATR (required)
     # -------------------------
     atr_value: Optional[float] = None
-    atr_obj = indicators.get("atr")
-    if isinstance(atr_obj, dict):
-        atr_value = atr_obj.get("value")
+    atr_value = indicators.get("atr")
+
 
     if not atr_value or atr_value <= 0:
         return {
@@ -1981,7 +1980,7 @@ def generate_fallback_analysis(indicators: Dict, price_data: Dict, price_scale: 
     confluence_score = max(0, min(100, round(score, 1)))
     
     # Trade setup (ATR + structure based)
-    trade_setup = calculate_trade_setup(
+    trade_setup = calculate_long_trade_setup(
     current_price=current_price,
     supports=supports,
     resistances=resistances,
