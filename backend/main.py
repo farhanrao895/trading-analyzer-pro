@@ -670,6 +670,28 @@ class IndicatorEngine:
         return round(ema, 4)
     
     @staticmethod
+    def calculate_ema_series(closes: List[float], period: int) -> List[float]:
+        """Calculate full EMA series (optimized for MACD)
+        
+        Returns the complete EMA series for all data points after initial period.
+        """
+        if len(closes) < period:
+            return [closes[-1]] if closes else [0]
+        
+        multiplier = 2 / (period + 1)
+        
+        # Start with SMA for first EMA value
+        ema = sum(closes[:period]) / period
+        ema_series = [ema]
+        
+        # Calculate EMA for rest of data
+        for price in closes[period:]:
+            ema = (price - ema) * multiplier + ema
+            ema_series.append(ema)
+        
+        return ema_series
+    
+    @staticmethod
     def calculate_sma(closes: List[float], period: int) -> float:
         """SMA (Simple Moving Average)"""
         if len(closes) < period:
@@ -678,23 +700,42 @@ class IndicatorEngine:
     
     @staticmethod
     def calculate_macd(closes: List[float]) -> Dict:
-        """MACD (12, 26, 9)"""
+        """MACD (12, 26, 9) - Optimized calculation
+        
+        Builds full EMA series once instead of recalculating for each period.
+        This significantly improves performance.
+        """
         if len(closes) < 26:
             return {"macd": 0, "signal": 0, "histogram": 0, "trend": "neutral"}
         
-        ema12 = IndicatorEngine.calculate_ema(closes, 12)
-        ema26 = IndicatorEngine.calculate_ema(closes, 26)
-        macd_line = ema12 - ema26
+        # Calculate full EMA series for 12 and 26 periods
+        ema12_series = IndicatorEngine.calculate_ema_series(closes, 12)
+        ema26_series = IndicatorEngine.calculate_ema_series(closes, 26)
         
-        # Calculate signal line (9-period EMA of MACD)
-        # For simplicity, approximate with recent MACD values
-        macd_values = []
-        for i in range(len(closes) - 26, len(closes)):
-            e12 = IndicatorEngine.calculate_ema(closes[:i+1], 12)
-            e26 = IndicatorEngine.calculate_ema(closes[:i+1], 26)
-            macd_values.append(e12 - e26)
+        # Build MACD line series from the difference
+        # Align series: EMA26 starts at index 0 (corresponds to closes[25])
+        # EMA12 starts at index 14 to align with EMA26 start
+        offset = 26 - 12  # 14 periods
+        macd_series = []
         
-        signal_line = IndicatorEngine.calculate_ema(macd_values, 9) if len(macd_values) >= 9 else macd_line
+        for i in range(len(ema26_series)):
+            ema12_idx = i + offset
+            if ema12_idx < len(ema12_series):
+                macd_val = ema12_series[ema12_idx] - ema26_series[i]
+                macd_series.append(macd_val)
+        
+        if not macd_series:
+            return {"macd": 0, "signal": 0, "histogram": 0, "trend": "neutral"}
+        
+        macd_line = macd_series[-1]
+        
+        # Apply 9-period EMA to MACD line series for signal line
+        if len(macd_series) >= 9:
+            signal_series = IndicatorEngine.calculate_ema_series(macd_series, 9)
+            signal_line = signal_series[-1]
+        else:
+            signal_line = macd_line
+        
         histogram = macd_line - signal_line
         
         if histogram > 0 and macd_line > signal_line:
@@ -846,10 +887,17 @@ class IndicatorEngine:
     
     @staticmethod
     def calculate_atr(klines: List[Dict], period: int = 14) -> float:
-        """ATR (Average True Range)"""
+        """ATR (Average True Range) using Wilder's smoothing method
+        
+        Initial ATR = Simple Average of first 14 True Ranges
+        Subsequent ATR = ((Previous ATR × 13) + Current True Range) / 14
+        
+        This matches RSI methodology and is more responsive to volatility changes.
+        """
         if len(klines) < period + 1:
             return 0
         
+        # Calculate all True Ranges
         trs = []
         for i in range(1, len(klines)):
             high = klines[i]["high"]
@@ -866,7 +914,14 @@ class IndicatorEngine:
         if len(trs) < period:
             return round(sum(trs) / len(trs), 4) if trs else 0
         
-        return round(sum(trs[-period:]) / period, 4)
+        # Initial ATR = Simple Average of first 14 True Ranges
+        atr = sum(trs[:period]) / period
+        
+        # Apply Wilder's smoothing for subsequent values
+        for i in range(period, len(trs)):
+            atr = ((atr * (period - 1)) + trs[i]) / period
+        
+        return round(atr, 4)
     
     @staticmethod
     def find_support_resistance(klines: List[Dict], num_levels: int = 3) -> Dict:
@@ -1006,6 +1061,86 @@ class IndicatorEngine:
             "up_volume": round(up_volume, 2),
             "down_volume": round(down_volume, 2)
         }
+    
+    @staticmethod
+    def calculate_obv(klines: List[Dict]) -> Dict:
+        """On-Balance Volume (OBV) indicator
+        
+        OBV accumulates volume based on price direction:
+        - If close > previous close: OBV = Previous OBV + Current Volume
+        - If close < previous close: OBV = Previous OBV - Current Volume
+        - If close == previous close: OBV = Previous OBV (unchanged)
+        
+        Returns OBV value, trend, and divergence detection.
+        """
+        if len(klines) < 2:
+            return {"obv": 0, "trend": "neutral", "divergence": "none", "signal": "neutral"}
+        
+        closes = [k["close"] for k in klines]
+        volumes = [k.get("volume", 0) for k in klines]
+        
+        # Calculate OBV series
+        obv_series = [volumes[0]]  # Initialize with first period's volume
+        
+        for i in range(1, len(closes)):
+            if closes[i] > closes[i-1]:
+                obv_series.append(obv_series[-1] + volumes[i])
+            elif closes[i] < closes[i-1]:
+                obv_series.append(obv_series[-1] - volumes[i])
+            else:
+                obv_series.append(obv_series[-1])  # Unchanged
+        
+        current_obv = obv_series[-1]
+        
+        # Calculate OBV trend (using last 10 periods)
+        lookback = min(10, len(obv_series) - 1)
+        if lookback >= 2:
+            obv_start = obv_series[-lookback]
+            obv_end = obv_series[-1]
+            obv_change_pct = ((obv_end - obv_start) / abs(obv_start)) * 100 if obv_start != 0 else 0
+            
+            if obv_change_pct > 5:
+                obv_trend = "increasing"
+            elif obv_change_pct < -5:
+                obv_trend = "decreasing"
+            else:
+                obv_trend = "neutral"
+        else:
+            obv_trend = "neutral"
+        
+        # Check for OBV vs Price divergence
+        divergence = "none"
+        signal = "neutral"
+        
+        if lookback >= 5:
+            price_start = closes[-lookback]
+            price_end = closes[-1]
+            price_change_pct = ((price_end - price_start) / price_start) * 100 if price_start != 0 else 0
+            
+            obv_start_div = obv_series[-lookback]
+            obv_end_div = obv_series[-1]
+            obv_change_div = ((obv_end_div - obv_start_div) / abs(obv_start_div)) * 100 if obv_start_div != 0 else 0
+            
+            # Bullish divergence: Price down, OBV up
+            if price_change_pct < -2 and obv_change_div > 3:
+                divergence = "bullish"
+                signal = "bullish"
+            # Bearish divergence: Price up, OBV down
+            elif price_change_pct > 2 and obv_change_div < -3:
+                divergence = "bearish"
+                signal = "bearish"
+            # Confirmation: Both moving same direction
+            elif price_change_pct > 2 and obv_change_div > 3:
+                signal = "bullish"
+            elif price_change_pct < -2 and obv_change_div < -3:
+                signal = "bearish"
+        
+        return {
+            "obv": round(current_obv, 2),
+            "trend": obv_trend,
+            "divergence": divergence,
+            "signal": signal
+        }
 
 
 def calculate_all_indicators(klines: List[Dict]) -> Dict:
@@ -1084,6 +1219,9 @@ def calculate_all_indicators(klines: List[Dict]) -> Dict:
     # Volume
     volume = engine.analyze_volume(klines, 20)
     
+    # On-Balance Volume (OBV)
+    obv = engine.calculate_obv(klines)
+    
     # Determine overall trend
     bullish_signals = 0
     bearish_signals = 0
@@ -1127,8 +1265,249 @@ def calculate_all_indicators(klines: List[Dict]) -> Dict:
         "support_resistance": sr_levels,
         "fibonacci": fib,
         "volume": volume,
+        "obv": obv,
         "trend": trend
     }
+
+
+def calculate_long_trade_setup(
+    current_price: float,
+    supports: List[Dict],
+    resistances: List[Dict],
+    atr_value: float,
+    confluence_score: float = 50,
+    higher_tf_trend: str = "neutral"
+) -> Dict:
+    """Calculate LONG trade setup with ATR-based stop loss and R-multiple take profits
+    
+    Professional risk management:
+    - Entry: Nearest support level (or current price if no support)
+    - Stop Loss: Support - (ATR × 1.5) with minimum 0.5% buffer, always below support
+    - Take Profits: R-multiples (1.5R, 2.5R, 4R) where R = Entry - SL
+    
+    Args:
+        current_price: Current market price
+        supports: List of support levels [{"price": float, "strength": str}, ...]
+        resistances: List of resistance levels [{"price": float, "strength": str}, ...]
+        atr_value: Current ATR(14) value
+        confluence_score: Confluence score (0-100)
+        higher_tf_trend: Higher timeframe trend ("bullish", "bearish", "neutral")
+    
+    Returns:
+        Dict with entry, stop_loss, tp1, tp2, tp3, risk_per_trade, risk_reward_ratio, bias
+    """
+    
+    # Determine bias: Only LONG or NEUTRAL for spot trading
+    # Only recommend LONG when confluence >= 60 AND higher TF is bullish or neutral
+    if confluence_score >= 60 and higher_tf_trend != "bearish":
+        bias = "long"
+        confidence = "high" if confluence_score >= 75 else "medium"
+    else:
+        bias = "neutral"
+        confidence = "low"
+    
+    # Entry: Nearest support level (or current price if no support)
+    if supports and len(supports) > 0:
+        nearest_support = supports[0]["price"]
+        entry_price = nearest_support
+        entry_reasoning = f"Entry at nearest support level ${nearest_support:,.2f}"
+    else:
+        entry_price = current_price
+        entry_reasoning = "Entry at current price (no clear support identified)"
+    
+    # Stop Loss: Must be below support with ATR buffer
+    if atr_value > 0:
+        # Standard ATR-based SL: Support - (ATR × 1.5)
+        atr_buffer = atr_value * 1.5
+        min_buffer = entry_price * 0.005  # Minimum 0.5% buffer
+        buffer = max(atr_buffer, min_buffer)
+        
+        if supports and len(supports) > 0:
+            # SL below support with buffer
+            sl_price = supports[0]["price"] - buffer
+            sl_reasoning = f"Stop loss below support (${supports[0]['price']:,.2f}) with ATR buffer"
+        else:
+            # No support - use ATR below entry
+            sl_price = entry_price - buffer
+            sl_reasoning = f"Stop loss below entry with ATR×1.5 buffer (${buffer:,.2f})"
+        
+        # Ensure SL is always below entry
+        if sl_price >= entry_price:
+            sl_price = entry_price - buffer
+            sl_reasoning = "Stop loss adjusted to maintain risk (below entry with ATR buffer)"
+    else:
+        # Fallback: 3% below entry if no ATR
+        sl_price = entry_price * 0.97
+        sl_reasoning = "Stop loss 3% below entry (fallback - no ATR available)"
+    
+    # Calculate Risk (R)
+    risk_per_trade = entry_price - sl_price
+    risk_pct = (risk_per_trade / entry_price) * 100 if entry_price > 0 else 0
+    
+    # Take Profits using R-multiples
+    tp1_price = entry_price + (risk_per_trade * 1.5)
+    tp2_price = entry_price + (risk_per_trade * 2.5)
+    tp3_price = entry_price + (risk_per_trade * 4.0)
+    
+    tp1_reasoning = "TP1: 1.5R target"
+    tp2_reasoning = "TP2: 2.5R target"
+    tp3_reasoning = "TP3: 4R extended target"
+    
+    # Adjust TPs if resistance levels are close (within 1% tolerance)
+    if resistances:
+        for i, res in enumerate(resistances[:3]):
+            res_price = res["price"]
+            
+            # Check TP1
+            if abs(res_price - tp1_price) / tp1_price < 0.01 and res_price > entry_price:
+                tp1_price = res_price
+                tp1_reasoning = f"TP1: Adjusted to resistance at ${res_price:,.2f}"
+            
+            # Check TP2
+            elif abs(res_price - tp2_price) / tp2_price < 0.01 and res_price > tp1_price:
+                tp2_price = res_price
+                tp2_reasoning = f"TP2: Adjusted to resistance at ${res_price:,.2f}"
+            
+            # Check TP3
+            elif abs(res_price - tp3_price) / tp3_price < 0.01 and res_price > tp2_price:
+                tp3_price = res_price
+                tp3_reasoning = f"TP3: Adjusted to resistance at ${res_price:,.2f}"
+    
+    # Validate: TPs must be in ascending order and above entry
+    tp1_price = max(tp1_price, entry_price * 1.01)  # At least 1% above entry
+    tp2_price = max(tp2_price, tp1_price * 1.01)    # Above TP1
+    tp3_price = max(tp3_price, tp2_price * 1.01)    # Above TP2
+    
+    # Calculate risk-reward ratios
+    rr1 = round((tp1_price - entry_price) / risk_per_trade, 1) if risk_per_trade > 0 else 1.5
+    rr2 = round((tp2_price - entry_price) / risk_per_trade, 1) if risk_per_trade > 0 else 2.5
+    rr3 = round((tp3_price - entry_price) / risk_per_trade, 1) if risk_per_trade > 0 else 4.0
+    
+    return {
+        "bias": bias,
+        "confidence": confidence,
+        "entry": {
+            "price": round(entry_price, 4),
+            "reasoning": entry_reasoning
+        },
+        "stop_loss": {
+            "price": round(sl_price, 4),
+            "reasoning": sl_reasoning
+        },
+        "tp1": {
+            "price": round(tp1_price, 4),
+            "risk_reward": f"1:{rr1}",
+            "reasoning": tp1_reasoning
+        },
+        "tp2": {
+            "price": round(tp2_price, 4),
+            "risk_reward": f"1:{rr2}",
+            "reasoning": tp2_reasoning
+        },
+        "tp3": {
+            "price": round(tp3_price, 4),
+            "risk_reward": f"1:{rr3}",
+            "reasoning": tp3_reasoning
+        },
+        "risk_per_trade": round(risk_per_trade, 4),
+        "risk_pct": round(risk_pct, 2),
+        "higher_tf_trend": higher_tf_trend
+    }
+
+
+async def check_higher_timeframe_trend(symbol: str, base_timeframe: str) -> Dict:
+    """Check higher timeframe trend for 4h and below timeframes
+    
+    For timeframes 4h and below: Fetch 1D klines and check EMA alignment.
+    Only allow LONG trades when higher timeframe trend is bullish or neutral.
+    
+    Args:
+        symbol: Trading pair symbol (e.g., "BTCUSDT")
+        base_timeframe: Current chart timeframe
+    
+    Returns:
+        Dict with trend status, alignment, and whether to allow longs
+    """
+    
+    # Define which timeframes need higher TF confirmation
+    needs_confirmation = ["1m", "5m", "15m", "30m", "1h", "4h"]
+    
+    if base_timeframe.lower() not in needs_confirmation:
+        # Weekly/daily charts don't need higher TF confirmation
+        return {
+            "trend": "neutral",
+            "alignment": "not_checked",
+            "allow_longs": True,
+            "higher_timeframe": "none"
+        }
+    
+    try:
+        # Fetch daily klines for higher timeframe analysis
+        daily_klines = await fetch_okx_klines(symbol, "1d", 200)
+        
+        if not daily_klines or len(daily_klines) < 50:
+            # Try other sources
+            daily_klines = await fetch_coingecko_ohlc(symbol, 30)  # 30 days
+        
+        if not daily_klines or len(daily_klines) < 20:
+            return {
+                "trend": "neutral",
+                "alignment": "insufficient_data",
+                "allow_longs": True,
+                "higher_timeframe": "1d"
+            }
+        
+        # Calculate EMAs on daily timeframe
+        closes = [k["close"] for k in daily_klines]
+        engine = IndicatorEngine()
+        
+        ema20 = engine.calculate_ema(closes, 20)
+        ema50 = engine.calculate_ema(closes, 50) if len(closes) >= 50 else ema20
+        ema200 = engine.calculate_ema(closes, min(len(closes), 200)) if len(closes) >= 100 else ema50
+        
+        current_price = closes[-1]
+        
+        # Determine trend alignment
+        if ema20 > ema50 > ema200:
+            trend = "bullish"
+            alignment = "ema20 > ema50 > ema200"
+            allow_longs = True
+        elif ema20 < ema50 < ema200:
+            trend = "bearish"
+            alignment = "ema20 < ema50 < ema200"
+            allow_longs = False  # Don't take longs against higher TF trend
+        else:
+            trend = "neutral"
+            alignment = "mixed"
+            allow_longs = True  # Neutral is okay for longs
+        
+        # Additional check: price vs EMAs
+        if current_price < ema200:
+            # Price below long-term trend - be cautious
+            if trend != "bearish":
+                trend = "cautious"
+                allow_longs = True  # Still allow but mark as cautious
+        
+        return {
+            "trend": trend,
+            "alignment": alignment,
+            "allow_longs": allow_longs,
+            "higher_timeframe": "1d",
+            "ema20": round(ema20, 4),
+            "ema50": round(ema50, 4),
+            "ema200": round(ema200, 4),
+            "price_vs_ema200": "above" if current_price > ema200 else "below"
+        }
+        
+    except Exception as e:
+        print(f"Error checking higher timeframe trend: {e}")
+        return {
+            "trend": "neutral",
+            "alignment": "error",
+            "allow_longs": True,
+            "higher_timeframe": "1d",
+            "error": str(e)
+        }
 
 
 @app.get("/api/indicators/{symbol}/{interval}")
@@ -1193,11 +1572,13 @@ def build_analysis_prompt(
     price_data: Dict,
     indicators: Dict,
     depth_data: Dict,
-    img_width: int,
-    img_height: int,
-    price_scale: Dict
+    higher_tf_trend: Dict = None
 ) -> str:
-    """Build Chain-of-Thought analysis prompt"""
+    """Build Chain-of-Thought analysis prompt - Simplified for pattern recognition only
+    
+    Y-axis coordinate calculations have been removed. Trade setup (entry/SL/TP) 
+    is now calculated algorithmically using ATR-based risk management.
+    """
     
     current_price = price_data.get("current_price", 0)
     rsi = indicators.get("rsi", {})
@@ -1209,22 +1590,32 @@ def build_analysis_prompt(
     sr = indicators.get("support_resistance", {})
     fib = indicators.get("fibonacci", {})
     vol = indicators.get("volume", {})
+    obv = indicators.get("obv", {})
     
-    max_price = price_scale["max_price"]
-    min_price = price_scale["min_price"]
-    chart_height = img_height - 150
+    # Higher timeframe info
+    htf_info = ""
+    if higher_tf_trend:
+        htf_info = f"""
+=== HIGHER TIMEFRAME TREND (1D) ===
+Daily Trend: {higher_tf_trend.get('trend', 'unknown')}
+EMA Alignment: {higher_tf_trend.get('alignment', 'unknown')}
+Allow Longs: {higher_tf_trend.get('allow_longs', True)}
+"""
     
     prompt = f"""ROLE: You are an expert institutional technical analyst with 20+ years experience.
 Analyze this {symbol} chart on {timeframe} timeframe using systematic Chain-of-Thought reasoning.
 
-=== VERIFIED MARKET DATA (FROM BINANCE API) ===
+IMPORTANT: This system is for SPOT TRADING ONLY. Only recommend LONG (BUY) setups or NEUTRAL (no trade).
+NEVER recommend SHORT positions as this is not supported.
+
+=== VERIFIED MARKET DATA (FROM API) ===
 Symbol: {symbol}
 Current Price: ${current_price:,.4f}
 24h Change: {price_data.get('price_change_pct', 0):.2f}%
 24h High: ${price_data.get('high_24h', 0):,.4f}
 24h Low: ${price_data.get('low_24h', 0):,.4f}
 24h Volume: ${price_data.get('quote_volume', 0):,.0f}
-
+{htf_info}
 === PRE-CALCULATED INDICATORS (VERIFIED) ===
 RSI(14): {rsi.get('value', 50)} ({rsi.get('signal', 'neutral')})
 EMA20: ${ema.get('ema20', 0):,.4f}
@@ -1234,11 +1625,12 @@ EMA Alignment: {ema.get('alignment', 'mixed')}
 Price vs EMAs: {ema.get('price_vs_ema', 'mixed')}
 MACD: {macd.get('macd', 0):.6f} | Signal: {macd.get('signal', 0):.6f} | Histogram: {macd.get('histogram', 0):.6f}
 MACD Trend: {macd.get('trend', 'neutral')}
-Divergence: {divergence.get('type', 'none')} ({divergence.get('signal', 'neutral')}) - {divergence.get('indicator', 'none')} - Strength: {divergence.get('strength', 'none')}
+Divergence: {divergence.get('type', 'none')} ({divergence.get('signal', 'neutral')}) - Strength: {divergence.get('strength', 'none')}
 Bollinger Bands: Upper ${bb.get('upper', 0):,.4f} | Middle ${bb.get('middle', 0):,.4f} | Lower ${bb.get('lower', 0):,.4f}
 Bollinger Position: {bb.get('position', 'middle')}
 ATR(14): ${atr:,.4f}
 Volume Trend: {vol.get('trend', 'neutral')} (Ratio: {vol.get('ratio', 1.0):.2f}x)
+OBV Trend: {obv.get('trend', 'neutral')} | Divergence: {obv.get('divergence', 'none')}
 
 === DETECTED SUPPORT/RESISTANCE ===
 Support Levels: {json.dumps(sr.get('support', []))}
@@ -1253,27 +1645,6 @@ Swing High: ${fib.get('swing_high', 0):,.4f}
 Swing Low: ${fib.get('swing_low', 0):,.4f}
 Key Levels: {json.dumps(fib.get('levels', {}))}
 
-=== CRITICAL: READ PRICE SCALE FROM SCREENSHOT ===
-FIRST, look at the Y-axis on the RIGHT side of the chart image. Read the EXACT price values shown:
-- Find the HIGHEST price label visible (near the top of chart)
-- Find the LOWEST price label visible (near the bottom of chart)
-These values are YOUR price scale for calculating Y coordinates.
-
-Image Dimensions: {img_width}px × {img_height}px
-Estimated price range from data: ${min_price:,.4f} to ${max_price:,.4f} (USE SCREENSHOT VALUES IF DIFFERENT)
-
-=== Y-COORDINATE FORMULA ===
-Chart area: approximately Y=50 (top) to Y={img_height - 100} (bottom)
-Chart height: {img_height - 150} pixels
-
-For any price P, using the SCREENSHOT's visible max_price and min_price:
-Y = 50 + ((screenshot_max_price - P) / (screenshot_max_price - screenshot_min_price)) × {img_height - 150}
-
-EXAMPLE: If screenshot shows 106,000 at top and 80,000 at bottom:
-- For $90,000: Y = 50 + ((106000 - 90000) / (106000 - 80000)) × {img_height - 150}
-
-IMPORTANT: Read the ACTUAL prices from the screenshot's right Y-axis, don't just use the estimated values.
-
 === CHAIN-OF-THOUGHT ANALYSIS ===
 
 STEP 1: TREND ASSESSMENT
@@ -1281,9 +1652,9 @@ Look at the EMA alignment and price structure. Is price making higher highs/lows
 
 STEP 2: MOMENTUM EVALUATION  
 Evaluate RSI (oversold <30 is bullish, overbought >70 is bearish) and MACD (positive histogram is bullish).
-Check for divergences: Bullish divergence (price lower low, indicator higher low) is very bullish. Bearish divergence (price higher high, indicator lower high) is bearish.
+Check for divergences: Bullish divergence (price lower low, indicator higher low) is very bullish.
 
-STEP 3: CHART PATTERN RECOGNITION (CRITICAL)
+STEP 3: CHART PATTERN RECOGNITION (CRITICAL - 15% of confluence)
 Carefully examine the chart for any recognizable patterns. Look for:
 
 REVERSAL PATTERNS:
@@ -1291,23 +1662,19 @@ REVERSAL PATTERNS:
 - Double Top / Double Bottom
 - Triple Top / Triple Bottom
 - Rising Wedge / Falling Wedge
-- Ascending Triangle / Descending Triangle
-- Symmetrical Triangle
-- Rectangle / Trading Range
 - Cup & Handle
 - Rounding Bottom / Rounding Top
 
 CONTINUATION PATTERNS:
 - Bull Flag / Bear Flag
 - Pennant (Bullish/Bearish)
-- Ascending Triangle (continuation)
-- Descending Triangle (continuation)
-- Symmetrical Triangle (continuation)
+- Ascending/Descending/Symmetrical Triangle
+- Rectangle / Trading Range
 
 CANDLESTICK PATTERNS:
 - Engulfing Patterns (Bullish/Bearish)
-- Hammer / Hanging Man
-- Doji / Star Patterns
+- Hammer / Hanging Man / Inverted Hammer
+- Doji / Morning Star / Evening Star
 - Three White Soldiers / Three Black Crows
 
 If you identify ANY pattern:
@@ -1321,30 +1688,27 @@ Identify where price might bounce (support) or get rejected (resistance).
 
 STEP 5: CONFLUENCE SCORING
 Score each indicator 0-100 based on how bullish it is, then multiply by weight:
-- Chart Pattern: weight 15% (if pattern detected, score based on bullishness; if no pattern, score 50)
-- S/R Levels: weight 20% (increased importance)
-- Divergence: weight 8% (bullish divergence = high score, bearish = low score, none = 50)
-- RSI: weight 10% (reduced)
-- MACD: weight 10% (reduced)
-- EMA Alignment: weight 10% (reduced)
+- Chart Pattern: weight 15%
+- S/R Levels: weight 20%
+- Divergence: weight 8%
+- RSI: weight 10%
+- MACD: weight 10%
+- EMA Alignment: weight 10%
 - Price vs EMA: weight 8%
 - Fibonacci: weight 8%
 - Bollinger: weight 8%
 - Volume: weight 3%
 
-STEP 6: TRADE SETUP
-Only recommend trade if confluence ≥ 60. Entry at support, SL below support, TPs at resistance levels.
-Consider pattern implications: If a bullish pattern is forming/completed, it strengthens the setup.
+STEP 6: TRADE RECOMMENDATION
+Based on confluence score:
+- If confluence >= 60 AND indicators are bullish: recommend "long"
+- Otherwise: recommend "neutral" (no trade)
+NEVER recommend "short" - this is for spot trading only.
 
 === OUTPUT FORMAT (JSON ONLY - NO MARKDOWN, NO CODE BLOCKS) ===
 
 Return ONLY valid JSON with this exact structure:
 {{
-  "price_scale_from_screenshot": {{
-    "max_price": <highest price visible on chart Y-axis>,
-    "min_price": <lowest price visible on chart Y-axis>,
-    "source": "read from screenshot Y-axis"
-  }},
   "trend_analysis": {{
     "trend": "bullish/bearish/neutral",
     "reasoning": "explanation"
@@ -1363,7 +1727,7 @@ Return ONLY valid JSON with this exact structure:
   "indicators": {{
     "rsi": {{"value": {rsi.get('value', 50)}, "signal": "{rsi.get('signal', 'neutral')}", "score": <0-100>, "weight": 10, "weighted_score": <calculated>, "explanation": "why"}},
     "macd": {{"value": {{"macd": {macd.get('macd', 0)}, "signal": {macd.get('signal', 0)}, "histogram": {macd.get('histogram', 0)}}}, "signal": "{macd.get('trend', 'neutral')}", "score": <0-100>, "weight": 10, "weighted_score": <calculated>, "explanation": "why"}},
-    "divergence": {{"type": "{divergence.get('type', 'none')}", "signal": "{divergence.get('signal', 'neutral')}", "indicator": "{divergence.get('indicator', 'none')}", "strength": "{divergence.get('strength', 'none')}", "score": <0-100>, "weight": 8, "weighted_score": <calculated>, "explanation": "why"}},
+    "divergence": {{"type": "{divergence.get('type', 'none')}", "signal": "{divergence.get('signal', 'neutral')}", "strength": "{divergence.get('strength', 'none')}", "score": <0-100>, "weight": 8, "weighted_score": <calculated>, "explanation": "why"}},
     "ema_alignment": {{"value": "{ema.get('alignment', 'mixed')}", "signal": "bullish/bearish/neutral", "score": <0-100>, "weight": 10, "weighted_score": <calculated>, "explanation": "why"}},
     "price_vs_ema": {{"value": "{ema.get('price_vs_ema', 'mixed')}", "signal": "bullish/bearish/neutral", "score": <0-100>, "weight": 8, "weighted_score": <calculated>, "explanation": "why"}},
     "support_resistance": {{"nearest_support": <price>, "nearest_resistance": <price>, "signal": "bullish/bearish/neutral", "score": <0-100>, "weight": 20, "weighted_score": <calculated>, "explanation": "why"}},
@@ -1384,37 +1748,26 @@ Return ONLY valid JSON with this exact structure:
     "Bollinger": <weighted_score>,
     "Volume": <weighted_score>
   }},
-  "trade_setup": {{
-    "bias": "long/short/neutral",
-    "confidence": "high/medium/low",
-    "entry": {{"price": <number>, "y": <Y coordinate using formula>, "reasoning": "why"}},
-    "stop_loss": {{"price": <number>, "y": <Y coordinate>, "reasoning": "why"}},
-    "tp1": {{"price": <number>, "y": <Y coordinate>, "risk_reward": "1:1.5", "reasoning": "why"}},
-    "tp2": {{"price": <number>, "y": <Y coordinate>, "risk_reward": "1:2.5", "reasoning": "why"}},
-    "tp3": {{"price": <number>, "y": <Y coordinate>, "risk_reward": "1:4", "reasoning": "why"}}
-  }},
+  "recommended_bias": "long/neutral",
   "support_levels": [
-    {{"price": <n>, "y": <Y coordinate>, "strength": "strong/moderate/weak"}}
+    {{"price": <n>, "strength": "strong/moderate/weak"}}
   ],
   "resistance_levels": [
-    {{"price": <n>, "y": <Y coordinate>, "strength": "strong/moderate/weak"}}
+    {{"price": <n>, "strength": "strong/moderate/weak"}}
   ],
-  "risk_reward": "1:X",
   "analysis_summary": "2-3 sentence summary",
-  "trade_rationale": "detailed explanation"
+  "trade_rationale": "detailed explanation of why to trade or not trade"
 }}
 
 CRITICAL RULES:
-1. FIRST read the price scale from the screenshot's Y-axis (right side) - this is CRITICAL for accurate line placement
-2. Use THOSE screenshot prices for price_scale_from_screenshot (max_price, min_price)
-3. Calculate Y coordinates using: Y = 50 + ((screenshot_max - P) / (screenshot_max - screenshot_min)) × {img_height - 150}
-4. CAREFULLY examine the chart for patterns - this is worth 15% of confluence score
-5. Use the EXACT indicator values provided above for analysis
-6. Divergence detection: If bullish divergence detected, give high score (80-100). If bearish, low score (0-20). If none, score 50.
-7. confluence_score MUST equal sum of all weighted_scores (Chart Pattern + S/R + Divergence + RSI + MACD + EMA Alignment + Price vs EMA + Fibonacci + Bollinger + Volume = 100%)
-8. Only recommend trade if confluence_score ≥ 60
-9. For SPOT trading, prefer LONG setups
-10. Return ONLY valid JSON, no markdown code blocks"""
+1. CAREFULLY examine the chart for patterns - this is worth 15% of confluence score
+2. Use the EXACT indicator values provided above for analysis
+3. Divergence detection: Bullish divergence = high score (80-100), Bearish = low score (0-20), None = 50
+4. confluence_score MUST equal sum of all weighted_scores (totaling 100%)
+5. Only recommend "long" if confluence_score >= 60 AND most indicators are bullish
+6. NEVER recommend "short" - only "long" or "neutral"
+7. Return ONLY valid JSON, no markdown code blocks
+8. Trade setup prices (entry/SL/TP) will be calculated algorithmically - just provide analysis"""
 
     return prompt
 
@@ -1761,13 +2114,13 @@ async def analyze_chart(
         # Calculate indicators
         indicators = calculate_all_indicators(klines)
         
-        # Get price scale
-        price_scale = extract_price_scale(klines)
+        # Check higher timeframe trend for trade filtering
+        higher_tf_trend = await check_higher_timeframe_trend(symbol, timeframe)
         
-        # Build prompt and call Gemini
+        # Build prompt and call Gemini (simplified - no Y-coordinate calculations)
         prompt = build_analysis_prompt(
             symbol, timeframe, price_data, indicators, depth_data,
-            img_width, img_height, price_scale
+            higher_tf_trend
         )
         
         analysis_data = {}
@@ -1798,42 +2151,64 @@ async def analyze_chart(
                 print(f"Gemini error: {e}")
         
         # Fallback: Generate basic analysis from calculated indicators if AI fails
-        if not analysis_data or "trade_setup" not in analysis_data:
-            analysis_data = generate_fallback_analysis(indicators, price_data, price_scale, img_height)
+        if not analysis_data or "recommended_bias" not in analysis_data:
+            analysis_data = generate_fallback_analysis(indicators, price_data, higher_tf_trend)
         
-        # Use price scale from screenshot if Gemini read it, otherwise use klines-based
-        drawing_price_scale = price_scale  # Default to klines-based
-        if analysis_data.get("price_scale_from_screenshot"):
-            screenshot_scale = analysis_data["price_scale_from_screenshot"]
-            if screenshot_scale.get("max_price") and screenshot_scale.get("min_price"):
-                drawing_price_scale = {
-                    "max_price": float(screenshot_scale["max_price"]),
-                    "min_price": float(screenshot_scale["min_price"])
-                }
-                print(f"Using screenshot price scale: {drawing_price_scale['min_price']} - {drawing_price_scale['max_price']}")
+        # Return original image (no annotations - pattern recognition is done by Gemini)
+        annotated_b64 = base64.b64encode(image_bytes).decode('utf-8')
         
-        # Draw annotations using the best available price scale
-        annotated_bytes = draw_annotations(image_bytes, analysis_data, drawing_price_scale, img_height)
-        annotated_b64 = base64.b64encode(annotated_bytes).decode('utf-8')
+        # Calculate professional trade setup using ATR-based risk management
+        current_price = price_data["current_price"]
+        sr = indicators.get("support_resistance", {})
+        supports = sr.get("support", [])
+        resistances = sr.get("resistance", [])
+        atr_value = indicators.get("atr", 0)
+        
+        # Get confluence score from AI analysis
+        confluence_score = analysis_data.get("confluence_score", 50)
+        ai_bias = analysis_data.get("recommended_bias", "neutral")
+        
+        # Calculate professional trade setup
+        trade_setup = calculate_long_trade_setup(
+            current_price=current_price,
+            supports=supports,
+            resistances=resistances,
+            atr_value=atr_value,
+            confluence_score=confluence_score,
+            higher_tf_trend=higher_tf_trend.get("trend", "neutral")
+        )
+        
+        # Determine final bias: Only "long" or "neutral" for spot trading
+        # Require both AI recommendation and confluence threshold
+        if ai_bias == "long" and confluence_score >= 60 and higher_tf_trend.get("allow_longs", True):
+            final_bias = "long"
+        else:
+            final_bias = "neutral"
+        trade_setup["bias"] = final_bias
+        
+        # Format support/resistance levels without Y coordinates
+        support_levels = [{"price": s["price"], "strength": s.get("strength", "moderate")} for s in supports[:3]]
+        resistance_levels = [{"price": r["price"], "strength": r.get("strength", "moderate")} for r in resistances[:3]]
         
         # Build response
         return {
             "success": True,
             "symbol": symbol,
             "timeframe": timeframe,
-            "current_price": price_data["current_price"],
+            "current_price": current_price,
             "binance_data": price_data,
             "calculated_indicators": indicators,
+            "higher_tf_trend": higher_tf_trend,
             "chart_pattern": analysis_data.get("chart_pattern", {}),
             "indicators": analysis_data.get("indicators", {}),
-            "trade_setup": analysis_data.get("trade_setup", {}),
-            "support_levels": analysis_data.get("support_levels", []),
-            "resistance_levels": analysis_data.get("resistance_levels", []),
-            "confluence_score": analysis_data.get("confluence_score", 0),
+            "trade_setup": trade_setup,
+            "support_levels": support_levels,
+            "resistance_levels": resistance_levels,
+            "confluence_score": confluence_score,
             "confluence_breakdown": analysis_data.get("confluence_breakdown", {}),
             "trend": analysis_data.get("trend_analysis", {}).get("trend", indicators.get("trend", "neutral")),
-            "bias": analysis_data.get("trade_setup", {}).get("bias", "neutral"),
-            "risk_reward": analysis_data.get("risk_reward", "N/A"),
+            "bias": final_bias,
+            "risk_reward": trade_setup.get("tp2", {}).get("risk_reward", "1:2.5"),
             "analysis_summary": analysis_data.get("analysis_summary", ""),
             "trade_rationale": analysis_data.get("trade_rationale", ""),
             "annotated_image": f"data:image/png;base64,{annotated_b64}",
@@ -1849,43 +2224,34 @@ async def analyze_chart(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def generate_fallback_analysis(indicators: Dict, price_data: Dict, price_scale: Dict, img_height: int) -> Dict:
-    """Generate fallback analysis when AI fails"""
+def generate_fallback_analysis(indicators: Dict, price_data: Dict, higher_tf_trend: Dict = None) -> Dict:
+    """Generate fallback analysis when AI fails
+    
+    Professional analysis with:
+    - ATR-based risk management
+    - Only LONG or NEUTRAL bias (no shorts for spot trading)
+    - OBV indicator included
+    - No Y coordinates (removed)
+    """
     
     current_price = price_data["current_price"]
-    max_price = price_scale["max_price"]
-    min_price = price_scale["min_price"]
     
     sr = indicators.get("support_resistance", {})
     supports = sr.get("support", [])
     resistances = sr.get("resistance", [])
     
-    # Calculate Y coordinates for levels
-    def get_y(price: float) -> int:
-        return price_to_y(price, max_price, min_price, img_height)
+    # Support/Resistance levels (without Y coordinates)
+    support_levels = [{"price": s["price"], "strength": s.get("strength", "moderate")} for s in supports[:3]]
+    resistance_levels = [{"price": r["price"], "strength": r.get("strength", "moderate")} for r in resistances[:3]]
     
-    support_levels = []
-    for s in supports[:3]:
-        support_levels.append({
-            "price": s["price"],
-            "y": get_y(s["price"]),
-            "strength": s.get("strength", "moderate")
-        })
-    
-    resistance_levels = []
-    for r in resistances[:3]:
-        resistance_levels.append({
-            "price": r["price"],
-            "y": get_y(r["price"]),
-            "strength": r.get("strength", "moderate")
-        })
-    
-    # Determine trade setup
+    # Get indicator data
     rsi = indicators.get("rsi", {})
     macd = indicators.get("macd", {})
     ema = indicators.get("ema", {})
     vol = indicators.get("volume", {})
     bb = indicators.get("bollinger", {})
+    obv = indicators.get("obv", {})
+    divergence = indicators.get("divergence", {})
     
     # Simple confluence scoring with updated weights
     score = 50  # Start neutral
@@ -1902,7 +2268,6 @@ def generate_fallback_analysis(indicators: Dict, price_data: Dict, price_scale: 
     score += (sr_score - 50) * 0.20
     
     # Divergence (8%)
-    divergence = indicators.get("divergence", {})
     if divergence.get("signal") == "bullish":
         div_score = 85
     elif divergence.get("signal") == "bearish":
@@ -1979,42 +2344,51 @@ def generate_fallback_analysis(indicators: Dict, price_data: Dict, price_scale: 
     
     confluence_score = max(0, min(100, round(score, 1)))
     
-    # Trade setup (ATR + structure based)
-    trade_setup = calculate_long_trade_setup(
-    current_price=current_price,
-    supports=supports,
-    resistances=resistances,
-    indicators=indicators,
-    confluence_score=confluence_score,
-    )
-
+    # Determine bias: Only "long" or "neutral" for spot trading
+    # Require confluence >= 60 AND higher TF is bullish or neutral
+    htf_trend = higher_tf_trend.get("trend", "neutral") if higher_tf_trend else "neutral"
+    allow_longs = higher_tf_trend.get("allow_longs", True) if higher_tf_trend else True
     
-    # Get divergence data
-    divergence = indicators.get("divergence", {})
+    if confluence_score >= 60 and htf_trend != "bearish" and allow_longs:
+        recommended_bias = "long"
+    else:
+        recommended_bias = "neutral"
     
     return {
-        "price_scale": price_scale,
-        "chart_pattern": {"name": "none", "type": "none", "direction": "neutral", "reliability": "none", "status": "none", "description": "No pattern detected in fallback", "score": 50, "weight": 15, "weighted_score": breakdown.get("Chart Pattern", 7.5)},
-        "trend_analysis": {"trend": indicators.get("trend", "neutral"), "reasoning": "Based on indicator analysis"},
+        "chart_pattern": {
+            "name": "none", 
+            "type": "none", 
+            "direction": "neutral", 
+            "reliability": "none", 
+            "status": "none", 
+            "description": "No pattern detected in fallback analysis", 
+            "score": 50, 
+            "weight": 15, 
+            "weighted_score": breakdown.get("Chart Pattern", 7.5)
+        },
+        "trend_analysis": {
+            "trend": indicators.get("trend", "neutral"), 
+            "reasoning": "Based on indicator analysis"
+        },
         "indicators": {
             "rsi": {"value": rsi.get("value", 50), "signal": rsi.get("signal", "neutral"), "score": rsi_score, "weight": 10, "weighted_score": breakdown["RSI"], "explanation": "RSI analysis"},
             "macd": {"value": macd, "signal": macd.get("trend", "neutral"), "score": macd_score, "weight": 10, "weighted_score": breakdown["MACD"], "explanation": "MACD analysis"},
-            "divergence": {"type": divergence.get("type", "none"), "signal": divergence.get("signal", "neutral"), "indicator": divergence.get("indicator", "none"), "strength": divergence.get("strength", "none"), "score": div_score, "weight": 8, "weighted_score": breakdown["Divergence"], "explanation": "Divergence analysis"},
+            "divergence": {"type": divergence.get("type", "none"), "signal": divergence.get("signal", "neutral"), "strength": divergence.get("strength", "none"), "score": div_score, "weight": 8, "weighted_score": breakdown["Divergence"], "explanation": "Divergence analysis"},
             "ema_alignment": {"value": ema.get("alignment", "mixed"), "signal": ema.get("alignment", "mixed"), "score": ema_score, "weight": 10, "weighted_score": breakdown["EMA Alignment"], "explanation": "EMA alignment"},
             "price_vs_ema": {"value": ema.get("price_vs_ema", "mixed"), "signal": ema.get("price_vs_ema", "mixed"), "score": pve_score, "weight": 8, "weighted_score": breakdown["Price vs EMA"], "explanation": "Price position vs EMAs"},
             "support_resistance": {"nearest_support": supports[0]["price"] if supports else current_price * 0.95, "nearest_resistance": resistances[0]["price"] if resistances else current_price * 1.05, "signal": "bullish" if supports else "neutral", "score": sr_score, "weight": 20, "weighted_score": breakdown["S/R Levels"], "explanation": "Support/Resistance levels"},
             "fibonacci": {"key_level": "0.618", "price_at_level": current_price * 0.98, "signal": "neutral", "score": 55, "weight": 8, "weighted_score": breakdown["Fibonacci"], "explanation": "Fibonacci retracement"},
             "bollinger": {"position": bb.get("position", "middle"), "signal": "bullish" if bb.get("position") == "lower_band" else "bearish" if bb.get("position") == "upper_band" else "neutral", "score": bb_score, "weight": 8, "weighted_score": breakdown["Bollinger"], "explanation": "Bollinger Bands position"},
-            "volume": {"trend": vol.get("trend", "neutral"), "signal": vol.get("trend", "neutral"), "score": vol_score, "weight": 3, "weighted_score": breakdown["Volume"], "explanation": "Volume analysis"}
+            "volume": {"trend": vol.get("trend", "neutral"), "signal": vol.get("trend", "neutral"), "score": vol_score, "weight": 3, "weighted_score": breakdown["Volume"], "explanation": "Volume analysis"},
+            "obv": {"trend": obv.get("trend", "neutral"), "divergence": obv.get("divergence", "none"), "signal": obv.get("signal", "neutral"), "explanation": "On-Balance Volume analysis"}
         },
         "confluence_score": confluence_score,
         "confluence_breakdown": breakdown,
-        "trade_setup": trade_setup,
+        "recommended_bias": recommended_bias,
         "support_levels": support_levels,
         "resistance_levels": resistance_levels,
-        "risk_reward": "1:2.5",
-        "analysis_summary": f"Analysis shows {indicators.get('trend', 'neutral')} trend with confluence score of {confluence_score}.",
-        "trade_rationale": f"Based on RSI ({rsi.get('value', 50)}), MACD ({macd.get('trend', 'neutral')}), and EMA alignment ({ema.get('alignment', 'mixed')})."
+        "analysis_summary": f"Analysis shows {indicators.get('trend', 'neutral')} trend with confluence score of {confluence_score}. Higher TF trend: {htf_trend}.",
+        "trade_rationale": f"Based on RSI ({rsi.get('value', 50)}), MACD ({macd.get('trend', 'neutral')}), EMA alignment ({ema.get('alignment', 'mixed')}), and OBV ({obv.get('trend', 'neutral')})."
     }
 
 
