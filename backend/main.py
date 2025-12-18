@@ -2042,10 +2042,24 @@ def generate_fallback_analysis(indicators: Dict, price_data: Dict, price_scale: 
         "tp3": {"price": round(tp3_price, 4), "y": get_y(tp3_price), "risk_reward": "1:4", "reasoning": "Extended target"}
     }
     
+    # Get divergence data
+    divergence = indicators.get("divergence", {})
+    
     return {
         "price_scale": price_scale,
+        "chart_pattern": {"name": "none", "type": "none", "direction": "neutral", "reliability": "none", "status": "none", "description": "No pattern detected in fallback", "score": 50, "weight": 15, "weighted_score": breakdown.get("Chart Pattern", 7.5)},
         "trend_analysis": {"trend": indicators.get("trend", "neutral"), "reasoning": "Based on indicator analysis"},
-        "indicators": {},
+        "indicators": {
+            "rsi": {"value": rsi.get("value", 50), "signal": rsi.get("signal", "neutral"), "score": rsi_score, "weight": 10, "weighted_score": breakdown["RSI"], "explanation": "RSI analysis"},
+            "macd": {"value": macd, "signal": macd.get("trend", "neutral"), "score": macd_score, "weight": 10, "weighted_score": breakdown["MACD"], "explanation": "MACD analysis"},
+            "divergence": {"type": divergence.get("type", "none"), "signal": divergence.get("signal", "neutral"), "indicator": divergence.get("indicator", "none"), "strength": divergence.get("strength", "none"), "score": div_score, "weight": 8, "weighted_score": breakdown["Divergence"], "explanation": "Divergence analysis"},
+            "ema_alignment": {"value": ema.get("alignment", "mixed"), "signal": ema.get("alignment", "mixed"), "score": ema_score, "weight": 10, "weighted_score": breakdown["EMA Alignment"], "explanation": "EMA alignment"},
+            "price_vs_ema": {"value": ema.get("price_vs_ema", "mixed"), "signal": ema.get("price_vs_ema", "mixed"), "score": pve_score, "weight": 8, "weighted_score": breakdown["Price vs EMA"], "explanation": "Price position vs EMAs"},
+            "support_resistance": {"nearest_support": supports[0]["price"] if supports else current_price * 0.95, "nearest_resistance": resistances[0]["price"] if resistances else current_price * 1.05, "signal": "bullish" if supports else "neutral", "score": sr_score, "weight": 20, "weighted_score": breakdown["S/R Levels"], "explanation": "Support/Resistance levels"},
+            "fibonacci": {"key_level": "0.618", "price_at_level": current_price * 0.98, "signal": "neutral", "score": 55, "weight": 8, "weighted_score": breakdown["Fibonacci"], "explanation": "Fibonacci retracement"},
+            "bollinger": {"position": bb.get("position", "middle"), "signal": "bullish" if bb.get("position") == "lower_band" else "bearish" if bb.get("position") == "upper_band" else "neutral", "score": bb_score, "weight": 8, "weighted_score": breakdown["Bollinger"], "explanation": "Bollinger Bands position"},
+            "volume": {"trend": vol.get("trend", "neutral"), "signal": vol.get("trend", "neutral"), "score": vol_score, "weight": 3, "weighted_score": breakdown["Volume"], "explanation": "Volume analysis"}
+        },
         "confluence_score": confluence_score,
         "confluence_breakdown": breakdown,
         "trade_setup": trade_setup,
