@@ -135,18 +135,31 @@ const SignalBadge = ({ signal }: { signal: string }) => {
 const IndicatorCard = ({ name, indicator, icon }: { name: string; indicator: IndicatorData; icon: string }) => {
   const getDisplayValue = () => {
     // Special handling for MACD - show only the MACD line value
-    if (name === "MACD" && typeof indicator.value === 'object' && indicator.value !== null) {
-      const macdData = indicator.value as any
-      // Check if macd property exists (even if value is 0)
-      if ('macd' in macdData && macdData.macd !== undefined && macdData.macd !== null) {
-        return macdData.macd.toFixed(6)
+    if (name === "MACD") {
+      try {
+        if (typeof indicator.value === 'object' && indicator.value !== null) {
+          const macdData = indicator.value as any
+          // Check if macd property exists (even if value is 0)
+          if (macdData && typeof macdData === 'object' && 'macd' in macdData) {
+            const macdValue = macdData.macd
+            if (typeof macdValue === 'number') {
+              return macdValue.toFixed(6)
+            }
+          }
+        }
+      } catch (e) {
+        // Fall through to default handling
       }
     }
     
     if (typeof indicator.value === 'number') {
       return indicator.value.toFixed(2)
     }
-    if (typeof indicator.value === 'object') {
+    if (typeof indicator.value === 'object' && indicator.value !== null) {
+      // For MACD, don't show JSON string - show a placeholder instead
+      if (name === "MACD") {
+        return '-'
+      }
       return JSON.stringify(indicator.value).substring(0, 30) + '...'
     }
     return indicator.value || indicator.position || indicator.trend || indicator.key_level || '-'
