@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 
-const BINANCE_BASE_URL = 'https://api.binance.com/api/v3'
+const BYBIT_BASE_URL = 'https://api.bybit.com/v5/market'
+const BINANCE_BASE_URL = 'https://api.binance.com/api/v3'  // Fallback
 
 export async function GET(
   request: Request,
@@ -8,48 +9,86 @@ export async function GET(
 ) {
   try {
     const symbol = params.symbol.toUpperCase()
-    const limit = new URL(request.url).searchParams.get('limit') || '20'
+    const limit = Math.min(parseInt(new URL(request.url).searchParams.get('limit') || '20'), 50)
     
+    // Try Bybit first
+    const bybitRes = await fetch(
+      `${BYBIT_BASE_URL}/orderbook?category=spot&symbol=${symbol}&limit=${limit}`
+    )
+    
+    if (bybitRes.ok) {
+      const bybitData = await bybitRes.json()
+      if (bybitData.retCode === 0 && bybitData.result) {
+        const bids = (bybitData.result.b || []).map((b: any[]) => ({
+          price: parseFloat(b[0]),
+          quantity: parseFloat(b[1])
+        }))
+        
+        const asks = (bybitData.result.a || []).map((a: any[]) => ({
+          price: parseFloat(a[0]),
+          quantity: parseFloat(a[1])
+        }))
+        
+        const largest_bid = bids.length > 0 
+          ? bids.reduce((max: { price: number; quantity: number }, b: { price: number; quantity: number }) => b.quantity > max.quantity ? b : max, bids[0])
+          : { price: 0, quantity: 0 }
+        
+        const largest_ask = asks.length > 0
+          ? asks.reduce((max: { price: number; quantity: number }, a: { price: number; quantity: number }) => a.quantity > max.quantity ? a : max, asks[0])
+          : { price: 0, quantity: 0 }
+        
+        return NextResponse.json({
+          symbol,
+          bids,
+          asks,
+          largest_bid_wall: largest_bid,
+          largest_ask_wall: largest_ask,
+          bid_depth: bids.reduce((sum: number, b: { price: number; quantity: number }) => sum + b.quantity, 0),
+          ask_depth: asks.reduce((sum: number, a: { price: number; quantity: number }) => sum + a.quantity, 0)
+        })
+      }
+    }
+    
+    // Fallback to Binance
     const res = await fetch(
       `${BINANCE_BASE_URL}/depth?symbol=${symbol}&limit=${limit}`
     )
     
-    if (!res.ok) {
-      return NextResponse.json(
-        { error: `Failed to fetch depth for ${symbol}` },
-        { status: 404 }
-      )
+    if (res.ok) {
+      const data = await res.json()
+      const bids = data.bids?.map((b: any[]) => ({
+        price: parseFloat(b[0]),
+        quantity: parseFloat(b[1])
+      })) || []
+      
+      const asks = data.asks?.map((a: any[]) => ({
+        price: parseFloat(a[0]),
+        quantity: parseFloat(a[1])
+      })) || []
+      
+      const largest_bid = bids.length > 0 
+        ? bids.reduce((max: { price: number; quantity: number }, b: { price: number; quantity: number }) => b.quantity > max.quantity ? b : max, bids[0])
+        : { price: 0, quantity: 0 }
+      
+      const largest_ask = asks.length > 0
+        ? asks.reduce((max: { price: number; quantity: number }, a: { price: number; quantity: number }) => a.quantity > max.quantity ? a : max, asks[0])
+        : { price: 0, quantity: 0 }
+      
+      return NextResponse.json({
+        symbol,
+        bids,
+        asks,
+        largest_bid_wall: largest_bid,
+        largest_ask_wall: largest_ask,
+        bid_depth: bids.reduce((sum: number, b: { price: number; quantity: number }) => sum + b.quantity, 0),
+        ask_depth: asks.reduce((sum: number, a: { price: number; quantity: number }) => sum + a.quantity, 0)
+      })
     }
     
-    const data = await res.json()
-    
-    const bids = data.bids?.map((b: any[]) => ({
-      price: parseFloat(b[0]),
-      quantity: parseFloat(b[1])
-    })) || []
-    
-    const asks = data.asks?.map((a: any[]) => ({
-      price: parseFloat(a[0]),
-      quantity: parseFloat(a[1])
-    })) || []
-    
-    const largest_bid = bids.length > 0 
-      ? bids.reduce((max: { price: number; quantity: number }, b: { price: number; quantity: number }) => b.quantity > max.quantity ? b : max, bids[0])
-      : { price: 0, quantity: 0 }
-    
-    const largest_ask = asks.length > 0
-      ? asks.reduce((max: { price: number; quantity: number }, a: { price: number; quantity: number }) => a.quantity > max.quantity ? a : max, asks[0])
-      : { price: 0, quantity: 0 }
-    
-    return NextResponse.json({
-      symbol,
-      bids,
-      asks,
-      largest_bid_wall: largest_bid,
-      largest_ask_wall: largest_ask,
-      bid_depth: bids.reduce((sum: number, b: { price: number; quantity: number }) => sum + b.quantity, 0),
-      ask_depth: asks.reduce((sum: number, a: { price: number; quantity: number }) => sum + a.quantity, 0)
-    })
+    return NextResponse.json(
+      { error: `Failed to fetch depth for ${symbol}` },
+      { status: 404 }
+    )
   } catch (error: any) {
     return NextResponse.json(
       { error: error.message || 'Failed to fetch depth' },

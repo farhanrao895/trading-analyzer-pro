@@ -61,10 +61,9 @@ for model_name in ['gemini-2.5-flash', 'gemini-2.0-flash-exp', 'gemini-1.5-flash
 # CONSTANTS
 # ============================================================
 
-# Use proxy to bypass IP restrictions (Railway IPs are blocked by Binance)
-# Try direct first, fallback to proxy if needed
-BINANCE_BASE_URL = "https://api.binance.com/api/v3"
-BINANCE_PROXY_URL = "https://api.binance.com/api/v3"  # Can use proxy service if needed
+# Use Bybit API (not blocked like Binance)
+BYBIT_BASE_URL = "https://api.bybit.com/v5/market"
+BINANCE_BASE_URL = "https://api.binance.com/api/v3"  # Fallback only
 
 POPULAR_PAIRS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
@@ -84,31 +83,32 @@ TIMEFRAMES = {
 # PART 1: BINANCE API INTEGRATION
 # ============================================================
 
+async def fetch_bybit(endpoint: str, params: dict = None) -> Optional[Dict]:
+    """Fetch from Bybit API (not blocked like Binance)"""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            url = f"{BYBIT_BASE_URL}/{endpoint}"
+            resp = await client.get(url, params=params)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("retCode") == 0:  # Bybit success code
+                    return data.get("result")
+            print(f"Bybit API error: {resp.status_code} - {resp.text[:200]}")
+        except Exception as e:
+            print(f"Bybit fetch error: {e}")
+    return None
+
 async def fetch_binance(endpoint: str, params: dict = None) -> Optional[Dict]:
-    """Generic Binance API fetcher with error handling and proxy fallback"""
+    """Generic Binance API fetcher (fallback)"""
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             url = f"{BINANCE_BASE_URL}/{endpoint}"
-            resp = await client.get(url, params=params, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "application/json"
-            })
+            resp = await client.get(url, params=params)
             if resp.status_code == 200:
                 return resp.json()
-            
-            # If blocked (451), try with different headers or return None
-            if resp.status_code == 451:
-                print(f"Binance API blocked (451) - Railway IP restricted")
-                # Return None - frontend will handle via Vercel API routes
-                return None
-                
             print(f"Binance API error: {resp.status_code} - {resp.text[:200]}")
-        except httpx.TimeoutException as e:
-            print(f"Binance API timeout: {e}")
         except Exception as e:
             print(f"Binance fetch error: {e}")
-            import traceback
-            traceback.print_exc()
     return None
 
 
@@ -147,9 +147,36 @@ async def get_price(symbol: str):
 
 @app.get("/api/klines/{symbol}/{interval}")
 async def get_klines(symbol: str, interval: str, limit: int = Query(default=500, le=1000)):
-    """GET /api/klines/{symbol}/{interval} - Historical candlestick data"""
+    """GET /api/klines/{symbol}/{interval} - Historical candlestick data from Bybit"""
+    symbol = symbol.upper()
+    bybit_interval = INTERVAL_MAP.get(interval.lower(), interval)
+    
+    # Try Bybit first
+    data = await fetch_bybit("kline", {
+        "category": "spot",
+        "symbol": symbol,
+        "interval": bybit_interval,
+        "limit": min(limit, 200)  # Bybit max is 200
+    })
+    if data and data.get("list"):
+        klines = []
+        for k in reversed(data["list"]):  # Bybit returns newest first, reverse for chronological
+            klines.append({
+                "open_time": int(k[0]),
+                "open": float(k[1]),
+                "high": float(k[2]),
+                "low": float(k[3]),
+                "close": float(k[4]),
+                "volume": float(k[5]),
+                "close_time": int(k[0]) + (int(bybit_interval) * 60000 if bybit_interval.isdigit() else 86400000),
+                "quote_volume": float(k[6]) if len(k) > 6 else float(k[5]) * float(k[4]),
+                "trades": 0
+            })
+        return {"symbol": symbol, "interval": interval, "klines": klines}
+    
+    # Fallback to Binance
     data = await fetch_binance("klines", {
-        "symbol": symbol.upper(),
+        "symbol": symbol,
         "interval": interval,
         "limit": limit
     })
@@ -167,14 +194,41 @@ async def get_klines(symbol: str, interval: str, limit: int = Query(default=500,
                 "quote_volume": float(k[7]),
                 "trades": k[8]
             })
-        return {"symbol": symbol.upper(), "interval": interval, "klines": klines}
+        return {"symbol": symbol, "interval": interval, "klines": klines}
     raise HTTPException(status_code=404, detail=f"Failed to fetch klines for {symbol}")
 
 
 @app.get("/api/depth/{symbol}")
 async def get_depth(symbol: str, limit: int = Query(default=20, le=100)):
-    """GET /api/depth/{symbol} - Order book depth data"""
-    data = await fetch_binance("depth", {"symbol": symbol.upper(), "limit": limit})
+    """GET /api/depth/{symbol} - Order book depth data from Bybit"""
+    symbol = symbol.upper()
+    
+    # Try Bybit first
+    data = await fetch_bybit("orderbook", {
+        "category": "spot",
+        "symbol": symbol,
+        "limit": min(limit, 50)  # Bybit max is 50
+    })
+    if data:
+        bids = [{"price": float(b[0]), "quantity": float(b[1])} for b in data.get("b", [])]
+        asks = [{"price": float(a[0]), "quantity": float(a[1])} for a in data.get("a", [])]
+        
+        # Find largest walls
+        largest_bid = max(bids, key=lambda x: x["quantity"]) if bids else {"price": 0, "quantity": 0}
+        largest_ask = max(asks, key=lambda x: x["quantity"]) if asks else {"price": 0, "quantity": 0}
+        
+        return {
+            "symbol": symbol,
+            "bids": bids,
+            "asks": asks,
+            "largest_bid_wall": largest_bid,
+            "largest_ask_wall": largest_ask,
+            "bid_depth": sum(b["quantity"] for b in bids),
+            "ask_depth": sum(a["quantity"] for a in asks)
+        }
+    
+    # Fallback to Binance
+    data = await fetch_binance("depth", {"symbol": symbol, "limit": limit})
     if data:
         bids = [{"price": float(b[0]), "quantity": float(b[1])} for b in data.get("bids", [])]
         asks = [{"price": float(a[0]), "quantity": float(a[1])} for a in data.get("asks", [])]
@@ -184,7 +238,7 @@ async def get_depth(symbol: str, limit: int = Query(default=20, le=100)):
         largest_ask = max(asks, key=lambda x: x["quantity"]) if asks else {"price": 0, "quantity": 0}
         
         return {
-            "symbol": symbol.upper(),
+            "symbol": symbol,
             "bids": bids,
             "asks": asks,
             "largest_bid_wall": largest_bid,
@@ -1010,35 +1064,51 @@ async def analyze_chart(
         
         symbol = symbol.upper()
         
-        # Use provided Binance data (from frontend) or fetch from Binance
+        # Use provided data (from frontend) or fetch from Bybit
         if price_data_json:
-            # Use data provided by frontend (fetched from Vercel, not blocked)
+            # Use data provided by frontend
             price_data_raw = json.loads(price_data_json)
-            price_data = {
-                "symbol": price_data_raw["symbol"],
-                "current_price": float(price_data_raw["lastPrice"]),
-                "price_change_24h": float(price_data_raw.get("priceChange", 0)),
-                "price_change_pct": float(price_data_raw.get("priceChangePercent", 0)),
-                "high_24h": float(price_data_raw.get("highPrice", 0)),
-                "low_24h": float(price_data_raw.get("lowPrice", 0)),
-                "volume_24h": float(price_data_raw.get("volume", 0)),
-                "quote_volume": float(price_data_raw.get("quoteVolume", 0))
-            }
+            # Handle both Bybit and Binance formats
+            if "list" in price_data_raw:  # Bybit format
+                ticker = price_data_raw["list"][0]
+                price_data = {
+                    "symbol": ticker["symbol"],
+                    "current_price": float(ticker["lastPrice"]),
+                    "price_change_24h": (float(ticker.get("lastPrice", 0)) - float(ticker.get("prevPrice24h", ticker["lastPrice"]))),
+                    "price_change_pct": float(ticker.get("price24hPcnt", 0)) * 100,
+                    "high_24h": float(ticker.get("highPrice24h", ticker["lastPrice"])),
+                    "low_24h": float(ticker.get("lowPrice24h", ticker["lastPrice"])),
+                    "volume_24h": float(ticker.get("volume24h", 0)),
+                    "quote_volume": float(ticker.get("turnover24h", 0))
+                }
+            else:  # Binance format
+                price_data = {
+                    "symbol": price_data_raw["symbol"],
+                    "current_price": float(price_data_raw["lastPrice"]),
+                    "price_change_24h": float(price_data_raw.get("priceChange", 0)),
+                    "price_change_pct": float(price_data_raw.get("priceChangePercent", 0)),
+                    "high_24h": float(price_data_raw.get("highPrice", 0)),
+                    "low_24h": float(price_data_raw.get("lowPrice", 0)),
+                    "volume_24h": float(price_data_raw.get("volume", 0)),
+                    "quote_volume": float(price_data_raw.get("quoteVolume", 0))
+                }
         else:
-            # Fallback: try to fetch from Binance (may be blocked)
-            price_data_raw = await fetch_binance("ticker/24hr", {"symbol": symbol})
-            if not price_data_raw:
-                raise HTTPException(status_code=404, detail=f"Failed to fetch price for {symbol}. Binance API may be blocked from this location.")
-            price_data = {
-                "symbol": price_data_raw["symbol"],
-                "current_price": float(price_data_raw["lastPrice"]),
-                "price_change_24h": float(price_data_raw["priceChange"]),
-                "price_change_pct": float(price_data_raw["priceChangePercent"]),
-                "high_24h": float(price_data_raw["highPrice"]),
-                "low_24h": float(price_data_raw["lowPrice"]),
-                "volume_24h": float(price_data_raw["volume"]),
-                "quote_volume": float(price_data_raw["quoteVolume"])
-            }
+            # Fetch from Bybit (not blocked)
+            bybit_data = await fetch_bybit("tickers", {"category": "spot", "symbol": symbol})
+            if bybit_data and bybit_data.get("list"):
+                ticker = bybit_data["list"][0]
+                price_data = {
+                    "symbol": ticker["symbol"],
+                    "current_price": float(ticker["lastPrice"]),
+                    "price_change_24h": (float(ticker.get("lastPrice", 0)) - float(ticker.get("prevPrice24h", ticker["lastPrice"]))),
+                    "price_change_pct": float(ticker.get("price24hPcnt", 0)) * 100,
+                    "high_24h": float(ticker.get("highPrice24h", ticker["lastPrice"])),
+                    "low_24h": float(ticker.get("lowPrice24h", ticker["lastPrice"])),
+                    "volume_24h": float(ticker.get("volume24h", 0)),
+                    "quote_volume": float(ticker.get("turnover24h", 0))
+                }
+            else:
+                raise HTTPException(status_code=404, detail=f"Failed to fetch price for {symbol}")
         
         # Use provided klines or fetch
         if klines_data_json:
@@ -1056,23 +1126,29 @@ async def analyze_chart(
                 "low": float(k[3]), "close": float(k[4]), "volume": float(k[5])
             } for k in klines_raw]
         
-        # Use provided depth or fetch
+        # Use provided depth or fetch from Bybit
         if depth_data_json:
             depth_raw = json.loads(depth_data_json)
             depth_data = {"largest_bid_wall": {"price": 0, "quantity": 0}, "largest_ask_wall": {"price": 0, "quantity": 0}}
             if depth_raw:
-                bids = [{"price": float(b[0]), "quantity": float(b[1])} for b in depth_raw.get("bids", [])]
-                asks = [{"price": float(a[0]), "quantity": float(a[1])} for a in depth_raw.get("asks", [])]
+                # Handle both Bybit (b/a) and Binance (bids/asks) formats
+                bids = [{"price": float(b[0]), "quantity": float(b[1])} for b in depth_raw.get("bids", depth_raw.get("b", []))]
+                asks = [{"price": float(a[0]), "quantity": float(a[1])} for a in depth_raw.get("asks", depth_raw.get("a", []))]
                 if bids:
                     depth_data["largest_bid_wall"] = max(bids, key=lambda x: x["quantity"])
                 if asks:
                     depth_data["largest_ask_wall"] = max(asks, key=lambda x: x["quantity"])
         else:
-            depth_raw = await fetch_binance("depth", {"symbol": symbol, "limit": 20})
+            # Fetch from Bybit
+            bybit_data = await fetch_bybit("orderbook", {
+                "category": "spot",
+                "symbol": symbol,
+                "limit": 20
+            })
             depth_data = {"largest_bid_wall": {"price": 0, "quantity": 0}, "largest_ask_wall": {"price": 0, "quantity": 0}}
-            if depth_raw:
-                bids = [{"price": float(b[0]), "quantity": float(b[1])} for b in depth_raw.get("bids", [])]
-                asks = [{"price": float(a[0]), "quantity": float(a[1])} for a in depth_raw.get("asks", [])]
+            if bybit_data:
+                bids = [{"price": float(b[0]), "quantity": float(b[1])} for b in bybit_data.get("b", [])]
+                asks = [{"price": float(a[0]), "quantity": float(a[1])} for a in bybit_data.get("a", [])]
                 if bids:
                     depth_data["largest_bid_wall"] = max(bids, key=lambda x: x["quantity"])
                 if asks:
