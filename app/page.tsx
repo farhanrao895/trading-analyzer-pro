@@ -134,21 +134,26 @@ const SignalBadge = ({ signal }: { signal: string }) => {
 
 const IndicatorCard = ({ name, indicator, icon }: { name: string; indicator: IndicatorData; icon: string }) => {
   const getDisplayValue = () => {
-    // Special handling for MACD - show only the MACD line value
+    // Special handling for MACD - show MACD line cleanly
     if (name === "MACD") {
       try {
-        if (typeof indicator.value === 'object' && indicator.value !== null) {
-          const macdData = indicator.value as any
-          // Check if macd property exists (even if value is 0)
-          if (macdData && typeof macdData === 'object' && 'macd' in macdData) {
-            const macdValue = macdData.macd
-            if (typeof macdValue === 'number') {
-              return macdValue.toFixed(6)
-            }
+        // Case A: value is object
+        if (typeof indicator.value === "object" && indicator.value !== null) {
+          const macdData = indicator.value as any;
+          if ("macd" in macdData && typeof macdData.macd === "number") {
+            return macdData.macd.toFixed(4);
           }
         }
-      } catch (e) {
-        // Fall through to default handling
+
+        // Case B: value is JSON string
+        if (typeof indicator.value === "string") {
+          const parsed = JSON.parse(indicator.value);
+          if (parsed && typeof parsed === "object" && typeof parsed.macd === "number") {
+            return parsed.macd.toFixed(4);
+          }
+        }
+      } catch {
+        // fall through
       }
     }
     
@@ -165,6 +170,16 @@ const IndicatorCard = ({ name, indicator, icon }: { name: string; indicator: Ind
     return indicator.value || indicator.position || indicator.trend || indicator.key_level || '-'
   }
 
+  const getMacdDetails = () => {
+    try {
+      let m: any = indicator.value;
+      if (typeof m === "string") m = JSON.parse(m);
+      if (typeof m === "object" && m !== null) return m;
+    } catch {}
+    return null;
+  };
+  const macdDetails = name === "MACD" ? getMacdDetails() : null;
+
   return (
     <div className="bg-slate-800/60 rounded-lg p-4 border border-slate-700/50 hover:border-cyan-500/30 transition-colors">
       <div className="flex items-center justify-between mb-2">
@@ -178,6 +193,14 @@ const IndicatorCard = ({ name, indicator, icon }: { name: string; indicator: Ind
       <div className="text-xl font-bold text-white mb-1">
         {getDisplayValue()}
       </div>
+      
+      {/* MACD Details */}
+      {name === "MACD" && macdDetails && (
+        <div className="mt-2 text-xs text-slate-400 space-y-1">
+          <div className="flex justify-between"><span>Signal</span><span className="text-slate-200">{Number(macdDetails.signal).toFixed(4)}</span></div>
+          <div className="flex justify-between"><span>Hist</span><span className="text-slate-200">{Number(macdDetails.histogram).toFixed(4)}</span></div>
+        </div>
+      )}
       
       {indicator.score !== undefined && (
         <div className="mt-2">
@@ -815,19 +838,16 @@ export default function TradingAnalyzerPro() {
                   {result.indicators.volume && (
                     <IndicatorCard name="Volume" indicator={result.indicators.volume} icon="📦" />
                   )}
-                </div>
-              </div>
-            )}
-
-            {/* Chart Pattern & Divergence Section */}
-            {result && (
-              <div className="bg-slate-900/50 rounded-xl p-5 border border-slate-800">
-                <h3 className="font-bold text-white mb-4 flex items-center gap-2">
-                  <span className="text-xl">🔍</span> Chart Analysis
-                </h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <ChartPatternCard pattern={result.chart_pattern} />
-                  <DivergenceCard divergence={result.indicators?.divergence} />
+                  {result.chart_pattern && (
+                    <div className="md:col-span-2 xl:col-span-2">
+                      <ChartPatternCard pattern={result.chart_pattern} />
+                    </div>
+                  )}
+                  {result.indicators?.divergence && (
+                    <div className="md:col-span-2 xl:col-span-2">
+                      <DivergenceCard divergence={result.indicators.divergence} />
+                    </div>
+                  )}
                 </div>
               </div>
             )}
