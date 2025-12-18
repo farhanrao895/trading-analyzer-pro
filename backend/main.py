@@ -83,14 +83,22 @@ TIMEFRAMES = {
 
 async def fetch_binance(endpoint: str, params: dict = None) -> Optional[Dict]:
     """Generic Binance API fetcher with error handling"""
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            resp = await client.get(f"{BINANCE_BASE_URL}/{endpoint}", params=params)
+            url = f"{BINANCE_BASE_URL}/{endpoint}"
+            resp = await client.get(url, params=params)
             if resp.status_code == 200:
                 return resp.json()
             print(f"Binance API error: {resp.status_code} - {resp.text[:200]}")
+            # Log the full response for debugging
+            if resp.status_code != 200:
+                print(f"Failed URL: {url}, Params: {params}, Response: {resp.text}")
+        except httpx.TimeoutException as e:
+            print(f"Binance API timeout: {e}")
         except Exception as e:
             print(f"Binance fetch error: {e}")
+            import traceback
+            traceback.print_exc()
     return None
 
 
