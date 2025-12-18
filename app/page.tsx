@@ -4,17 +4,20 @@ import { useState, useEffect, useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
 import axios from 'axios'
 
-// Use environment variable for backend URL, or auto-detect
+// Use Vercel API routes for simple data (price, symbols, klines, depth)
+// Use Railway backend only for analysis (which needs Python/OpenCV)
 const getApiUrl = () => {
   if (typeof window !== 'undefined') {
-    // Client-side: use environment variable or default to same origin
-    return process.env.NEXT_PUBLIC_BACKEND_URL || window.location.origin
+    // Client-side: use same origin (Vercel API routes) for simple endpoints
+    // Use Railway backend only for /api/analyze
+    return window.location.origin
   }
-  // Server-side: use environment variable or localhost
-  return process.env.BACKEND_URL || 'http://localhost:8002'
+  // Server-side: use same origin
+  return process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3000'
 }
 
 const API_URL = getApiUrl()
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8002')
 
 // ============================================================
 // TYPES
@@ -387,7 +390,7 @@ export default function TradingAnalyzerPro() {
     formData.append('timeframe', timeframe)
 
     try {
-      const res = await axios.post(`${API_URL}/api/analyze`, formData, {
+      const res = await axios.post(`${BACKEND_URL}/api/analyze`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
         timeout: 120000
       })
