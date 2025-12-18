@@ -134,6 +134,14 @@ const SignalBadge = ({ signal }: { signal: string }) => {
 
 const IndicatorCard = ({ name, indicator, icon }: { name: string; indicator: IndicatorData; icon: string }) => {
   const getDisplayValue = () => {
+    // Special handling for MACD
+    if (name === "MACD" && typeof indicator.value === 'object' && indicator.value !== null) {
+      const macdData = indicator.value as any
+      if (macdData.macd !== undefined) {
+        return `MACD: ${macdData.macd.toFixed(2)} | Signal: ${macdData.signal?.toFixed(2) || 'N/A'} | Hist: ${macdData.histogram?.toFixed(2) || 'N/A'}`
+      }
+    }
+    
     if (typeof indicator.value === 'number') {
       return indicator.value.toFixed(2)
     }
