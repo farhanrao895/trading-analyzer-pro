@@ -1430,6 +1430,130 @@ def draw_annotations(image_bytes: bytes, analysis_data: Dict, price_scale: Dict,
     # Pattern recognition is done by Gemini Vision, not by drawing lines
     return image_bytes
 
+from typing import Any, Dict, List, Optional
+
+def calculate_long_trade_setup(
+    *,
+    current_price: float,
+    supports: List[Dict[str, Any]],
+    resistances: List[Dict[str, Any]],
+    indicators: Dict[str, Any],
+    confluence_score: float,
+) -> Dict[str, Any]:
+    """
+    LONG-only trade setup:
+    - If confluence < 55 => NO TRADE
+    - Entry from nearest support (else current price)
+    - SL from ATR (volatility-aware)
+    - TP targets from R multiples (1.5R/2.5R/4R) and capped by resistances
+    """
+
+    # -------------------------
+    # 1) LONG-only permission
+    # -------------------------
+    if confluence_score < 55:
+        return {
+            "bias": "neutral",
+            "confidence": "low",
+            "reason": "Confluence below LONG threshold",
+            "entry": None,
+            "stop_loss": None,
+            "tp1": None,
+            "tp2": None,
+            "tp3": None,
+        }
+
+    # -------------------------
+    # 2) ATR (required)
+    # -------------------------
+    atr_value: Optional[float] = None
+    atr_obj = indicators.get("atr")
+    if isinstance(atr_obj, dict):
+        atr_value = atr_obj.get("value")
+
+    if not atr_value or atr_value <= 0:
+        return {
+            "bias": "neutral",
+            "confidence": "low",
+            "reason": "ATR unavailable or invalid",
+            "entry": None,
+            "stop_loss": None,
+            "tp1": None,
+            "tp2": None,
+            "tp3": None,
+        }
+
+    # -------------------------
+    # 3) Entry (structure-first)
+    # -------------------------
+    entry_price = supports[0]["price"] if supports and "price" in supports[0] else current_price
+
+    # -------------------------
+    # 4) Stop Loss (ATR-based)
+    # -------------------------
+    sl_mult = 1.5  # tighten 1.2 or loosen 2.0 if needed
+    sl_price = entry_price - (atr_value * sl_mult)
+
+    risk = entry_price - sl_price  # > 0 for long
+
+    # Avoid tiny/noisy setups
+    if risk <= atr_value * 0.5:
+        return {
+            "bias": "neutral",
+            "confidence": "low",
+            "reason": "Risk too small vs ATR (noisy setup)",
+            "entry": None,
+            "stop_loss": None,
+            "tp1": None,
+            "tp2": None,
+            "tp3": None,
+        }
+
+    # -------------------------
+    # 5) Targets by R multiples
+    # -------------------------
+    rr1, rr2, rr3 = 1.5, 2.5, 4.0
+    tp1 = entry_price + (risk * rr1)
+    tp2 = entry_price + (risk * rr2)
+    tp3 = entry_price + (risk * rr3)
+
+    # -------------------------
+    # 6) Cap targets by resistances (take profit at/under resistance)
+    # -------------------------
+    if resistances:
+        if len(resistances) > 0 and "price" in resistances[0]:
+            tp1 = min(tp1, resistances[0]["price"])
+        if len(resistances) > 1 and "price" in resistances[1]:
+            tp2 = min(tp2, resistances[1]["price"])
+        if len(resistances) > 2 and "price" in resistances[2]:
+            tp3 = min(tp3, resistances[2]["price"])
+
+    # -------------------------
+    # 7) Final validation
+    # -------------------------
+    if not (sl_price < entry_price < tp1 < tp2 < tp3):
+        return {
+            "bias": "neutral",
+            "confidence": "low",
+            "reason": "Invalid LONG ordering after snapping to resistance",
+            "entry": None,
+            "stop_loss": None,
+            "tp1": None,
+            "tp2": None,
+            "tp3": None,
+        }
+
+    confidence = "high" if confluence_score >= 70 else "medium" if confluence_score >= 60 else "low"
+
+    return {
+        "bias": "long",
+        "confidence": confidence,
+        "entry": {"price": round(entry_price, 6), "reasoning": "Nearest support / structure-based"},
+        "stop_loss": {"price": round(sl_price, 6), "reasoning": "ATR-based stop"},
+        "tp1": {"price": round(tp1, 6), "risk_reward": "1:1.5", "reasoning": "R-multiple capped by resistance"},
+        "tp2": {"price": round(tp2, 6), "risk_reward": "1:2.5", "reasoning": "R-multiple capped by resistance"},
+        "tp3": {"price": round(tp3, 6), "risk_reward": "1:4", "reasoning": "R-multiple capped by resistance"},
+    }
 
 # ============================================================
 # PART 6: MAIN ANALYSIS ENDPOINT
@@ -1856,32 +1980,15 @@ def generate_fallback_analysis(indicators: Dict, price_data: Dict, price_scale: 
     
     confluence_score = max(0, min(100, round(score, 1)))
     
-    # Trade setup
-    bias = "long" if confluence_score >= 55 else "short" if confluence_score <= 45 else "neutral"
-    
-    # Entry at nearest support for long
-    entry_price = supports[0]["price"] if supports else current_price * 0.99
-    sl_price = entry_price * 0.97  # 3% below entry
-    
-    # TPs
-    tp1_price = entry_price * 1.03
-    tp2_price = entry_price * 1.05
-    tp3_price = entry_price * 1.08
-    
-    if resistances:
-        tp1_price = resistances[0]["price"] if len(resistances) > 0 else tp1_price
-        tp2_price = resistances[1]["price"] if len(resistances) > 1 else tp2_price
-        tp3_price = resistances[2]["price"] if len(resistances) > 2 else tp3_price
-    
-    trade_setup = {
-        "bias": bias,
-        "confidence": "medium" if confluence_score >= 60 else "low",
-        "entry": {"price": round(entry_price, 4), "y": get_y(entry_price), "reasoning": "Near support level"},
-        "stop_loss": {"price": round(sl_price, 4), "y": get_y(sl_price), "reasoning": "Below support"},
-        "tp1": {"price": round(tp1_price, 4), "y": get_y(tp1_price), "risk_reward": "1:1.5", "reasoning": "First resistance"},
-        "tp2": {"price": round(tp2_price, 4), "y": get_y(tp2_price), "risk_reward": "1:2.5", "reasoning": "Second resistance"},
-        "tp3": {"price": round(tp3_price, 4), "y": get_y(tp3_price), "risk_reward": "1:4", "reasoning": "Extended target"}
-    }
+    # Trade setup (ATR + structure based)
+    trade_setup = calculate_trade_setup(
+    current_price=current_price,
+    supports=supports,
+    resistances=resistances,
+    indicators=indicators,
+    confluence_score=confluence_score,
+    )
+
     
     # Get divergence data
     divergence = indicators.get("divergence", {})
