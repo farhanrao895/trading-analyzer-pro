@@ -137,7 +137,8 @@ const IndicatorCard = ({ name, indicator, icon }: { name: string; indicator: Ind
     // Special handling for MACD - show only the MACD line value
     if (name === "MACD" && typeof indicator.value === 'object' && indicator.value !== null) {
       const macdData = indicator.value as any
-      if (macdData.macd !== undefined) {
+      // Check if macd property exists (even if value is 0)
+      if ('macd' in macdData && macdData.macd !== undefined && macdData.macd !== null) {
         return macdData.macd.toFixed(6)
       }
     }
@@ -805,11 +806,16 @@ export default function TradingAnalyzerPro() {
               </div>
             )}
 
-            {/* Chart Pattern & Divergence */}
+            {/* Chart Pattern & Divergence Section */}
             {result && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <ChartPatternCard pattern={result.chart_pattern} />
-                <DivergenceCard divergence={result.indicators?.divergence} />
+              <div className="bg-slate-900/50 rounded-xl p-5 border border-slate-800">
+                <h3 className="font-bold text-white mb-4 flex items-center gap-2">
+                  <span className="text-xl">🔍</span> Chart Analysis
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <ChartPatternCard pattern={result.chart_pattern} />
+                  <DivergenceCard divergence={result.indicators?.divergence} />
+                </div>
               </div>
             )}
 
