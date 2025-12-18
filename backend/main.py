@@ -1125,14 +1125,26 @@ Swing High: ${fib.get('swing_high', 0):,.4f}
 Swing Low: ${fib.get('swing_low', 0):,.4f}
 Key Levels: {json.dumps(fib.get('levels', {}))}
 
-=== CHART SPECIFICATIONS ===
+=== CRITICAL: READ PRICE SCALE FROM SCREENSHOT ===
+FIRST, look at the Y-axis on the RIGHT side of the chart image. Read the EXACT price values shown:
+- Find the HIGHEST price label visible (near the top of chart)
+- Find the LOWEST price label visible (near the bottom of chart)
+These values are YOUR price scale for calculating Y coordinates.
+
 Image Dimensions: {img_width}px × {img_height}px
-Y-axis Range: ${min_price:,.4f} (bottom, Y≈{img_height - 80}) to ${max_price:,.4f} (top, Y≈70)
-Chart Area: Y = 70 to Y = {img_height - 80}
+Estimated price range from data: ${min_price:,.4f} to ${max_price:,.4f} (USE SCREENSHOT VALUES IF DIFFERENT)
 
 === Y-COORDINATE FORMULA ===
-For any price P: Y = 70 + ((max_price - P) / (max_price - min_price)) × {chart_height}
-Where max_price = {max_price:,.4f} and min_price = {min_price:,.4f}
+Chart area: approximately Y=50 (top) to Y={img_height - 100} (bottom)
+Chart height: {img_height - 150} pixels
+
+For any price P, using the SCREENSHOT's visible max_price and min_price:
+Y = 50 + ((screenshot_max_price - P) / (screenshot_max_price - screenshot_min_price)) × {img_height - 150}
+
+EXAMPLE: If screenshot shows 106,000 at top and 80,000 at bottom:
+- For $90,000: Y = 50 + ((106000 - 90000) / (106000 - 80000)) × {img_height - 150}
+
+IMPORTANT: Read the ACTUAL prices from the screenshot's right Y-axis, don't just use the estimated values.
 
 === CHAIN-OF-THOUGHT ANALYSIS ===
 
@@ -1163,9 +1175,10 @@ Only recommend trade if confluence ≥ 60. Entry at support, SL below support, T
 
 Return ONLY valid JSON with this exact structure:
 {{
-  "price_scale": {{
-    "max_price": {max_price},
-    "min_price": {min_price}
+  "price_scale_from_screenshot": {{
+    "max_price": <highest price visible on chart Y-axis>,
+    "min_price": <lowest price visible on chart Y-axis>,
+    "source": "read from screenshot Y-axis"
   }},
   "trend_analysis": {{
     "trend": "bullish/bearish/neutral",
@@ -1213,12 +1226,14 @@ Return ONLY valid JSON with this exact structure:
 }}
 
 CRITICAL RULES:
-1. Use the EXACT indicator values provided above
-2. Calculate Y coordinates using: Y = 70 + ((max_price - price) / (max_price - min_price)) × {chart_height}
-3. confluence_score MUST equal sum of all weighted_scores
-4. Only recommend trade if confluence_score ≥ 60
-5. For SPOT trading, prefer LONG setups
-6. Return ONLY valid JSON, no markdown code blocks"""
+1. FIRST read the price scale from the screenshot's Y-axis (right side) - this is CRITICAL for accurate line placement
+2. Use THOSE screenshot prices for price_scale_from_screenshot (max_price, min_price)
+3. Calculate Y coordinates using: Y = 50 + ((screenshot_max - P) / (screenshot_max - screenshot_min)) × {img_height - 150}
+4. Use the EXACT indicator values provided above for analysis
+5. confluence_score MUST equal sum of all weighted_scores
+6. Only recommend trade if confluence_score ≥ 60
+7. For SPOT trading, prefer LONG setups
+8. Return ONLY valid JSON, no markdown code blocks"""
 
     return prompt
 
@@ -1641,8 +1656,19 @@ async def analyze_chart(
         if not analysis_data or "trade_setup" not in analysis_data:
             analysis_data = generate_fallback_analysis(indicators, price_data, price_scale, img_height)
         
-        # Draw annotations
-        annotated_bytes = draw_annotations(image_bytes, analysis_data, price_scale, img_height)
+        # Use price scale from screenshot if Gemini read it, otherwise use klines-based
+        drawing_price_scale = price_scale  # Default to klines-based
+        if analysis_data.get("price_scale_from_screenshot"):
+            screenshot_scale = analysis_data["price_scale_from_screenshot"]
+            if screenshot_scale.get("max_price") and screenshot_scale.get("min_price"):
+                drawing_price_scale = {
+                    "max_price": float(screenshot_scale["max_price"]),
+                    "min_price": float(screenshot_scale["min_price"])
+                }
+                print(f"Using screenshot price scale: {drawing_price_scale['min_price']} - {drawing_price_scale['max_price']}")
+        
+        # Draw annotations using the best available price scale
+        annotated_bytes = draw_annotations(image_bytes, analysis_data, drawing_price_scale, img_height)
         annotated_b64 = base64.b64encode(annotated_bytes).decode('utf-8')
         
         # Build response
