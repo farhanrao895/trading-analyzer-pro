@@ -1883,6 +1883,8 @@ def build_analysis_prompt(
     fib = indicators.get("fibonacci", {})
     vol = indicators.get("volume", {})
     obv = indicators.get("obv", {})
+    stoch_rsi = indicators.get("stoch_rsi", {})
+    adx = indicators.get("adx", {})
     
     # Higher timeframe info
     htf_info = ""
@@ -1921,6 +1923,8 @@ Divergence: {divergence.get('type', 'none')} ({divergence.get('signal', 'neutral
 Bollinger Bands: Upper ${bb.get('upper', 0):,.4f} | Middle ${bb.get('middle', 0):,.4f} | Lower ${bb.get('lower', 0):,.4f}
 Bollinger Position: {bb.get('position', 'middle')}
 ATR(14): ${atr:,.4f}
+Stochastic RSI: K={stoch_rsi.get('k', 50)}, D={stoch_rsi.get('d', 50)} ({stoch_rsi.get('signal', 'neutral')})
+ADX(14): {adx.get('adx', 0)} ({adx.get('trend_strength', 'weak')}) | +DI: {adx.get('plus_di', 0)} | -DI: {adx.get('minus_di', 0)}
 Volume Trend: {vol.get('trend', 'neutral')} (Ratio: {vol.get('ratio', 1.0):.2f}x)
 OBV Trend: {obv.get('trend', 'neutral')} | Divergence: {obv.get('divergence', 'none')}
 
