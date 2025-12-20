@@ -41,6 +41,39 @@ interface IndicatorData {
   strength?: string
 }
 
+interface OrderBlock {
+  start_index?: number
+  end_index?: number
+  high: number
+  low: number
+  strength?: string
+  is_valid?: boolean
+}
+
+interface FairValueGap {
+  top: number
+  bottom: number
+  direction?: string
+  is_filled?: boolean
+  fill_percentage?: number
+}
+
+interface LiquidityZone {
+  price: number
+  touches?: number
+  strength?: string
+  zone_type?: string
+}
+
+interface BreakOfStructure {
+  bos_detected?: boolean
+  direction?: string
+  structure_type?: string
+  confidence?: string
+  last_swing_high?: number
+  last_swing_low?: number
+}
+
 interface TradeSetup {
   bias?: string
   confidence?: string
@@ -428,6 +461,223 @@ const DivergenceCard = ({ divergence }: { divergence?: IndicatorData }) => {
           <div className="mt-3 flex items-center justify-between text-xs">
             <span className="text-slate-400">Divergence Score</span>
             <span className="text-cyan-400 font-medium">{divergence.score}/100 × {divergence.weight}% = {divergence.weighted_score?.toFixed(1) || 0}</span>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+const OrderBlockCard = ({ orderBlock, type }: { orderBlock?: OrderBlock; type: 'bullish' | 'bearish' }) => {
+  if (!orderBlock || !orderBlock.is_valid) {
+    return null
+  }
+
+  const getStrengthColor = () => {
+    if (orderBlock.strength === 'strong') return 'text-green-400'
+    return 'text-yellow-400'
+  }
+
+  return (
+    <div className="bg-slate-800/60 rounded-xl p-5 border border-slate-700">
+      <h3 className="font-bold text-white mb-3 flex items-center gap-2">
+        <span className="text-xl">{type === 'bullish' ? '🟢' : '🔴'}</span>
+        {type === 'bullish' ? 'Bullish' : 'Bearish'} Order Block
+      </h3>
+      
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">High:</span>
+          <span className="text-sm text-slate-200 font-medium">${orderBlock.high.toFixed(4)}</span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">Low:</span>
+          <span className="text-sm text-slate-200 font-medium">${orderBlock.low.toFixed(4)}</span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">Range:</span>
+          <span className="text-sm text-cyan-400 font-medium">
+            ${(orderBlock.high - orderBlock.low).toFixed(4)}
+          </span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">Strength:</span>
+          <span className={`text-sm font-medium ${getStrengthColor()}`}>
+            {orderBlock.strength?.toUpperCase() || 'MODERATE'}
+          </span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">Status:</span>
+          <span className="text-sm text-green-400 font-medium">VALID</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const FairValueGapCard = ({ fvg }: { fvg?: FairValueGap }) => {
+  if (!fvg) {
+    return null
+  }
+
+  const getDirectionColor = () => {
+    if (fvg.direction === 'bullish') return 'text-green-400'
+    return 'text-red-400'
+  }
+
+  const getFillStatus = () => {
+    if (fvg.is_filled) return { text: 'FILLED', color: 'text-slate-400' }
+    return { text: 'UNFILLED', color: 'text-yellow-400' }
+  }
+
+  const fillStatus = getFillStatus()
+
+  return (
+    <div className="bg-slate-800/60 rounded-xl p-5 border border-slate-700">
+      <h3 className="font-bold text-white mb-3 flex items-center gap-2">
+        <span className="text-xl">📊</span> Fair Value Gap
+      </h3>
+      
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">Direction:</span>
+          <span className={`text-sm font-medium ${getDirectionColor()}`}>
+            {fvg.direction?.toUpperCase() || 'NEUTRAL'}
+          </span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">Top:</span>
+          <span className="text-sm text-slate-200 font-medium">${fvg.top.toFixed(4)}</span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">Bottom:</span>
+          <span className="text-sm text-slate-200 font-medium">${fvg.bottom.toFixed(4)}</span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">Gap Size:</span>
+          <span className="text-sm text-cyan-400 font-medium">
+            ${(fvg.top - fvg.bottom).toFixed(4)}
+          </span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">Status:</span>
+          <span className={`text-sm font-medium ${fillStatus.color}`}>
+            {fillStatus.text}
+          </span>
+        </div>
+        {fvg.fill_percentage && fvg.fill_percentage > 0 && (
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-slate-400">Fill %:</span>
+            <span className="text-sm text-slate-300">{fvg.fill_percentage.toFixed(1)}%</span>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+const LiquidityZoneCard = ({ zone, position }: { zone?: LiquidityZone; position: 'above' | 'below' }) => {
+  if (!zone) {
+    return null
+  }
+
+  const getStrengthColor = () => {
+    if (zone.strength === 'strong') return 'text-green-400'
+    if (zone.strength === 'moderate') return 'text-yellow-400'
+    return 'text-red-400'
+  }
+
+  return (
+    <div className="bg-slate-800/60 rounded-xl p-5 border border-slate-700">
+      <h3 className="font-bold text-white mb-3 flex items-center gap-2">
+        <span className="text-xl">{position === 'above' ? '⬆️' : '⬇️'}</span>
+        Liquidity {position === 'above' ? 'Above' : 'Below'} Price
+      </h3>
+      
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">Price Level:</span>
+          <span className="text-sm text-slate-200 font-medium">${zone.price.toFixed(4)}</span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">Touches:</span>
+          <span className="text-sm text-cyan-400 font-medium">{zone.touches || 0}</span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">Strength:</span>
+          <span className={`text-sm font-medium ${getStrengthColor()}`}>
+            {zone.strength?.toUpperCase() || 'WEAK'}
+          </span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">Type:</span>
+          <span className="text-sm text-slate-300">{zone.zone_type?.toUpperCase() || 'UNKNOWN'}</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const BreakOfStructureCard = ({ bos }: { bos?: BreakOfStructure }) => {
+  if (!bos) {
+    return null
+  }
+
+  const getDirectionColor = () => {
+    if (bos.direction === 'bullish') return 'text-green-400'
+    if (bos.direction === 'bearish') return 'text-red-400'
+    return 'text-slate-400'
+  }
+
+  const getConfidenceColor = () => {
+    if (bos.confidence === 'high') return 'text-green-400'
+    if (bos.confidence === 'moderate') return 'text-yellow-400'
+    return 'text-slate-400'
+  }
+
+  return (
+    <div className="bg-slate-800/60 rounded-xl p-5 border border-slate-700">
+      <h3 className="font-bold text-white mb-3 flex items-center gap-2">
+        <span className="text-xl">⚡</span> Break of Structure
+      </h3>
+      
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">Detected:</span>
+          <span className={`text-sm font-medium ${bos.bos_detected ? 'text-green-400' : 'text-slate-400'}`}>
+            {bos.bos_detected ? 'YES' : 'NO'}
+          </span>
+        </div>
+        {bos.bos_detected && (
+          <>
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-slate-400">Direction:</span>
+              <span className={`text-sm font-medium ${getDirectionColor()}`}>
+                {bos.direction?.toUpperCase() || 'NEUTRAL'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-slate-400">Structure Type:</span>
+              <span className="text-sm text-slate-300">{bos.structure_type?.toUpperCase() || 'NEUTRAL'}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-slate-400">Confidence:</span>
+              <span className={`text-sm font-medium ${getConfidenceColor()}`}>
+                {bos.confidence?.toUpperCase() || 'NONE'}
+              </span>
+            </div>
+          </>
+        )}
+        {bos.last_swing_high && (
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-slate-400">Last Swing High:</span>
+            <span className="text-sm text-slate-200">${bos.last_swing_high.toFixed(4)}</span>
+          </div>
+        )}
+        {bos.last_swing_low && (
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-slate-400">Last Swing Low:</span>
+            <span className="text-sm text-slate-200">${bos.last_swing_low.toFixed(4)}</span>
           </div>
         )}
       </div>
@@ -847,6 +1097,47 @@ export default function TradingAnalyzerPro() {
                     <div className="md:col-span-2 xl:col-span-2">
                       <DivergenceCard divergence={result.indicators.divergence} />
                     </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Smart Money Concepts (SMC) */}
+            {result && result.calculated_indicators && (
+              <div className="bg-slate-900/50 rounded-xl p-5 border border-slate-800">
+                <h3 className="font-bold text-white mb-4 flex items-center gap-2">
+                  <span className="text-xl">💎</span> Smart Money Concepts
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                  {result.calculated_indicators.order_blocks?.nearest_bullish && (
+                    <OrderBlockCard 
+                      orderBlock={result.calculated_indicators.order_blocks.nearest_bullish} 
+                      type="bullish" 
+                    />
+                  )}
+                  {result.calculated_indicators.order_blocks?.nearest_bearish && (
+                    <OrderBlockCard 
+                      orderBlock={result.calculated_indicators.order_blocks.nearest_bearish} 
+                      type="bearish" 
+                    />
+                  )}
+                  {result.calculated_indicators.fair_value_gaps?.nearest_fvg && (
+                    <FairValueGapCard fvg={result.calculated_indicators.fair_value_gaps.nearest_fvg} />
+                  )}
+                  {result.calculated_indicators.liquidity_zones?.strongest_above && (
+                    <LiquidityZoneCard 
+                      zone={result.calculated_indicators.liquidity_zones.strongest_above} 
+                      position="above" 
+                    />
+                  )}
+                  {result.calculated_indicators.liquidity_zones?.strongest_below && (
+                    <LiquidityZoneCard 
+                      zone={result.calculated_indicators.liquidity_zones.strongest_below} 
+                      position="below" 
+                    />
+                  )}
+                  {result.calculated_indicators.break_of_structure && (
+                    <BreakOfStructureCard bos={result.calculated_indicators.break_of_structure} />
                   )}
                 </div>
               </div>

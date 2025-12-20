@@ -1413,6 +1413,405 @@ class IndicatorEngine:
             "trend_direction": "bullish" if final_plus_di > final_minus_di else "bearish"
         }
 
+    @staticmethod
+    def detect_order_blocks(klines: List[Dict], atr_period: int = 14, move_threshold: float = 1.5) -> Dict:
+        """Detect Order Blocks - Last bullish/bearish candle before strong move (≥1.5x ATR)
+        
+        Order Blocks are institutional entry zones where large orders were placed.
+        They are valid until price closes through them (invalidates the OB).
+        
+        Returns:
+            Dict with bullish_ob, bearish_ob lists, and nearest bullish/bearish OBs
+        """
+        if len(klines) < atr_period + 5:
+            return {"bullish_ob": [], "bearish_ob": [], "nearest_bullish": {}, "nearest_bearish": {}}
+        
+        # Calculate ATR first
+        atr_value = IndicatorEngine.calculate_atr(klines, atr_period)
+        if atr_value == 0:
+            return {"bullish_ob": [], "bearish_ob": [], "nearest_bullish": {}, "nearest_bearish": {}}
+        
+        min_move = atr_value * move_threshold
+        current_price = klines[-1]["close"]
+        
+        bullish_obs = []
+        bearish_obs = []
+        
+        # Look for Order Blocks: last candle before strong move
+        # Check candles from index 2 to len-3 (need room to look ahead)
+        for i in range(2, len(klines) - 3):
+            candle = klines[i]
+            prev_candle = klines[i-1]
+            
+            # Check if this candle is bullish or bearish
+            is_bullish = candle["close"] > candle["open"]
+            is_bearish = candle["close"] < candle["open"]
+            
+            if not (is_bullish or is_bearish):
+                continue  # Skip doji candles
+            
+            # Look ahead 2-5 candles for strong move
+            found_strong_move = False
+            move_direction = None
+            
+            for look_ahead in range(2, min(6, len(klines) - i)):
+                future_candle = klines[i + look_ahead]
+                
+                # Calculate move from current candle close to future candle
+                move_up = future_candle["high"] - candle["close"]
+                move_down = candle["close"] - future_candle["low"]
+                
+                if move_up >= min_move:
+                    found_strong_move = True
+                    move_direction = "bullish"
+                    break
+                elif move_down >= min_move:
+                    found_strong_move = True
+                    move_direction = "bearish"
+                    break
+            
+            if found_strong_move:
+                # Check if OB is still valid (price hasn't closed through it)
+                is_valid = True
+                ob_high = candle["high"]
+                ob_low = candle["low"]
+                
+                # Check all candles after the OB to see if price closed through it
+                for j in range(i + 1, len(klines)):
+                    future_close = klines[j]["close"]
+                    if move_direction == "bullish" and future_close < ob_low:
+                        is_valid = False  # Price closed below bullish OB
+                        break
+                    elif move_direction == "bearish" and future_close > ob_high:
+                        is_valid = False  # Price closed above bearish OB
+                        break
+                
+                ob_data = {
+                    "start_index": i,
+                    "end_index": i,
+                    "high": round(ob_high, 4),
+                    "low": round(ob_low, 4),
+                    "strength": "strong" if (ob_high - ob_low) >= atr_value else "moderate",
+                    "is_valid": is_valid
+                }
+                
+                if move_direction == "bullish" and is_bullish:
+                    bullish_obs.append(ob_data)
+                elif move_direction == "bearish" and is_bearish:
+                    bearish_obs.append(ob_data)
+        
+        # Find nearest valid bullish OB below current price (support) and bearish OB above (resistance)
+        nearest_bullish = {}
+        nearest_bearish = {}
+        
+        # Bullish OB should be below current price (support level to buy from)
+        valid_bullish = [ob for ob in bullish_obs if ob["is_valid"] and ob["high"] < current_price]
+        # Bearish OB should be above current price (resistance level that might reject)
+        valid_bearish = [ob for ob in bearish_obs if ob["is_valid"] and ob["low"] > current_price]
+        
+        if valid_bullish:
+            nearest_bullish = max(valid_bullish, key=lambda x: x["high"])  # Closest below current price
+        if valid_bearish:
+            nearest_bearish = min(valid_bearish, key=lambda x: x["low"])  # Closest above current price
+        
+        return {
+            "bullish_ob": bullish_obs[-10:],  # Return last 10 to avoid too much data
+            "bearish_ob": bearish_obs[-10:],
+            "nearest_bullish": nearest_bullish,
+            "nearest_bearish": nearest_bearish
+        }
+
+    @staticmethod
+    def detect_fair_value_gaps(klines: List[Dict], lookback: int = 100) -> Dict:
+        """Detect Fair Value Gaps (FVG) - 3-candle gap patterns where middle candle doesn't overlap
+        
+        FVGs are price imbalances that tend to get filled. They occur when:
+        - Bullish FVG: Gap up between candle i-1 and i+1 (candle i doesn't overlap)
+        - Bearish FVG: Gap down between candle i-1 and i+1 (candle i doesn't overlap)
+        
+        Returns:
+            Dict with bullish_fvg, bearish_fvg, unfilled_fvg, and nearest_fvg
+        """
+        if len(klines) < 3:
+            return {"bullish_fvg": [], "bearish_fvg": [], "unfilled_fvg": [], "nearest_fvg": {}}
+        
+        lookback = min(lookback, len(klines) - 2)
+        current_price = klines[-1]["close"]
+        
+        bullish_fvgs = []
+        bearish_fvgs = []
+        
+        # Check for FVGs in 3-candle windows
+        for i in range(1, len(klines) - 1):
+            prev_candle = klines[i-1]
+            curr_candle = klines[i]
+            next_candle = klines[i+1]
+            
+            # Check for bullish FVG (gap up)
+            # Middle candle high < min(prev high, next low)
+            if curr_candle["high"] < min(prev_candle["high"], next_candle["low"]):
+                fvg_top = min(prev_candle["high"], next_candle["low"])
+                fvg_bottom = max(prev_candle["high"], next_candle["low"])
+                
+                # Check if gap is filled (price has entered the gap zone)
+                is_filled = False
+                fill_percentage = 0.0
+                
+                for j in range(i + 1, len(klines)):
+                    candle_low = klines[j]["low"]
+                    candle_high = klines[j]["high"]
+                    
+                    if candle_low <= fvg_top and candle_high >= fvg_bottom:
+                        is_filled = True
+                        fill_percentage = 100.0
+                        break
+                    elif candle_low <= fvg_top or candle_high >= fvg_bottom:
+                        # Partially filled
+                        overlap_range = min(fvg_top, candle_high) - max(fvg_bottom, candle_low)
+                        if overlap_range > 0:
+                            fill_percentage = (overlap_range / (fvg_top - fvg_bottom)) * 100
+                
+                fvg_data = {
+                    "start_index": i - 1,
+                    "top": round(fvg_top, 4),
+                    "bottom": round(fvg_bottom, 4),
+                    "direction": "bullish",
+                    "is_filled": is_filled,
+                    "fill_percentage": round(fill_percentage, 2)
+                }
+                bullish_fvgs.append(fvg_data)
+            
+            # Check for bearish FVG (gap down)
+            # Middle candle low > max(prev low, next high)
+            elif curr_candle["low"] > max(prev_candle["low"], next_candle["high"]):
+                fvg_top = min(prev_candle["low"], next_candle["high"])
+                fvg_bottom = max(prev_candle["low"], next_candle["high"])
+                
+                # Check if gap is filled
+                is_filled = False
+                fill_percentage = 0.0
+                
+                for j in range(i + 1, len(klines)):
+                    candle_low = klines[j]["low"]
+                    candle_high = klines[j]["high"]
+                    
+                    if candle_low <= fvg_top and candle_high >= fvg_bottom:
+                        is_filled = True
+                        fill_percentage = 100.0
+                        break
+                    elif candle_low <= fvg_top or candle_high >= fvg_bottom:
+                        overlap_range = min(fvg_top, candle_high) - max(fvg_bottom, candle_low)
+                        if overlap_range > 0:
+                            fill_percentage = (overlap_range / (fvg_bottom - fvg_top)) * 100
+                
+                fvg_data = {
+                    "start_index": i - 1,
+                    "top": round(fvg_top, 4),
+                    "bottom": round(fvg_bottom, 4),
+                    "direction": "bearish",
+                    "is_filled": is_filled,
+                    "fill_percentage": round(fill_percentage, 2)
+                }
+                bearish_fvgs.append(fvg_data)
+        
+        # Get recent FVGs (last lookback candles)
+        recent_bullish = bullish_fvgs[-lookback:] if len(bullish_fvgs) > lookback else bullish_fvgs
+        recent_bearish = bearish_fvgs[-lookback:] if len(bearish_fvgs) > lookback else bearish_fvgs
+        
+        # Find unfilled FVGs
+        unfilled_fvg = []
+        for fvg in recent_bullish + recent_bearish:
+            if not fvg["is_filled"]:
+                unfilled_fvg.append(fvg)
+        
+        # Find nearest FVG to current price
+        nearest_fvg = {}
+        all_fvgs = recent_bullish + recent_bearish
+        if all_fvgs:
+            # Calculate distance from current price to each FVG
+            distances = []
+            for fvg in all_fvgs:
+                mid_price = (fvg["top"] + fvg["bottom"]) / 2
+                distance = abs(current_price - mid_price)
+                distances.append((distance, fvg))
+            
+            if distances:
+                nearest_fvg = min(distances, key=lambda x: x[0])[1]
+        
+        return {
+            "bullish_fvg": recent_bullish[-20:],  # Return last 20
+            "bearish_fvg": recent_bearish[-20:],
+            "unfilled_fvg": unfilled_fvg[-10:],  # Return last 10 unfilled
+            "nearest_fvg": nearest_fvg
+        }
+
+    @staticmethod
+    def detect_liquidity_zones(klines: List[Dict], cluster_threshold_pct: float = 0.5, min_cluster_size: int = 2) -> Dict:
+        """Detect Liquidity Zones - Clusters of swing highs/lows where stop losses cluster
+        
+        Liquidity zones are price levels where retail traders place stop losses.
+        These zones attract price as institutions hunt for liquidity.
+        
+        Returns:
+            Dict with liquidity_above, liquidity_below, strongest_above, strongest_below
+        """
+        if len(klines) < 20:
+            return {"liquidity_above": [], "liquidity_below": [], "strongest_above": {}, "strongest_below": {}}
+        
+        # Use existing method to find peaks and troughs
+        highs = [k["high"] for k in klines]
+        lows = [k["low"] for k in klines]
+        
+        peaks, troughs = IndicatorEngine.find_peaks_and_troughs(highs, lookback=5)
+        _, troughs_low = IndicatorEngine.find_peaks_and_troughs(lows, lookback=5)
+        
+        current_price = klines[-1]["close"]
+        
+        # Combine swing highs (peaks) and swing lows (troughs)
+        swing_points = [(idx, price, "high") for idx, price in peaks] + [(idx, price, "low") for idx, price in troughs_low]
+        
+        # Cluster swing points within threshold percentage
+        def cluster_levels(swing_points_list, threshold_pct):
+            if not swing_points_list:
+                return []
+            
+            # Sort by price
+            sorted_swings = sorted(swing_points_list, key=lambda x: x[1])
+            clusters = []
+            current_cluster = [sorted_swings[0]]
+            
+            for swing in sorted_swings[1:]:
+                # Check if swing is within threshold of cluster
+                cluster_avg = sum(s[1] for s in current_cluster) / len(current_cluster)
+                price_diff_pct = abs(swing[1] - cluster_avg) / cluster_avg * 100 if cluster_avg > 0 else 100
+                
+                if price_diff_pct <= threshold_pct:
+                    current_cluster.append(swing)
+                else:
+                    # Finalize current cluster
+                    if len(current_cluster) >= min_cluster_size:
+                        cluster_price = sum(s[1] for s in current_cluster) / len(current_cluster)
+                        clusters.append({
+                            "price": round(cluster_price, 4),
+                            "touches": len(current_cluster),
+                            "strength": "strong" if len(current_cluster) >= 4 else "moderate" if len(current_cluster) >= 3 else "weak",
+                            "zone_type": "high" if any(s[2] == "high" for s in current_cluster) else "low"
+                        })
+                    current_cluster = [swing]
+            
+            # Finalize last cluster
+            if len(current_cluster) >= min_cluster_size:
+                cluster_price = sum(s[1] for s in current_cluster) / len(current_cluster)
+                clusters.append({
+                    "price": round(cluster_price, 4),
+                    "touches": len(current_cluster),
+                    "strength": "strong" if len(current_cluster) >= 4 else "moderate" if len(current_cluster) >= 3 else "weak",
+                    "zone_type": "high" if any(s[2] == "high" for s in current_cluster) else "low"
+                })
+            
+            return clusters
+        
+        all_zones = cluster_levels(swing_points, cluster_threshold_pct)
+        
+        # Separate zones above and below current price
+        liquidity_above = [z for z in all_zones if z["price"] > current_price]
+        liquidity_below = [z for z in all_zones if z["price"] < current_price]
+        
+        # Sort by strength (touches)
+        liquidity_above.sort(key=lambda x: x["touches"], reverse=True)
+        liquidity_below.sort(key=lambda x: x["touches"], reverse=True)
+        
+        strongest_above = liquidity_above[0] if liquidity_above else {}
+        strongest_below = liquidity_below[0] if liquidity_below else {}
+        
+        return {
+            "liquidity_above": liquidity_above[:10],  # Top 10
+            "liquidity_below": liquidity_below[:10],
+            "strongest_above": strongest_above,
+            "strongest_below": strongest_below
+        }
+
+    @staticmethod
+    def detect_break_of_structure(klines: List[Dict], lookback: int = 50) -> Dict:
+        """Detect Break of Structure (BOS) - Price breaking above/below last 2 swing points
+        
+        BOS indicates a potential trend change. Structure breaks when:
+        - Bullish BOS: Price breaks above last 2 swing highs
+        - Bearish BOS: Price breaks below last 2 swing lows
+        
+        Returns:
+            Dict with bos_detected, direction, structure_type, confidence
+        """
+        if len(klines) < lookback:
+            return {"bos_detected": False, "direction": "neutral", "last_swing_high": 0, "last_swing_low": 0, "structure_type": "neutral", "confidence": "none"}
+        
+        lookback = min(lookback, len(klines))
+        recent_klines = klines[-lookback:]
+        
+        # Find swing highs and lows
+        highs = [k["high"] for k in recent_klines]
+        lows = [k["low"] for k in recent_klines]
+        
+        peaks, troughs = IndicatorEngine.find_peaks_and_troughs(highs, lookback=5)
+        _, troughs_low = IndicatorEngine.find_peaks_and_troughs(lows, lookback=5)
+        
+        if len(peaks) < 2 or len(troughs_low) < 2:
+            return {"bos_detected": False, "direction": "neutral", "last_swing_high": 0, "last_swing_low": 0, "structure_type": "neutral", "confidence": "none"}
+        
+        # Get last 2 swing highs and lows (by index, not value - need actual prices)
+        swing_highs = sorted([(idx, price) for idx, price in peaks], key=lambda x: x[0])[-2:]
+        swing_lows = sorted([(idx, price) for idx, price in troughs_low], key=lambda x: x[0])[-2:]
+        
+        last_swing_high = max(h for _, h in swing_highs)
+        second_last_swing_high = min(h for _, h in swing_highs)
+        last_swing_low = min(l for _, l in swing_lows)
+        second_last_swing_low = max(l for _, l in swing_lows)
+        
+        current_price = klines[-1]["close"]
+        current_high = klines[-1]["high"]
+        current_low = klines[-1]["low"]
+        
+        # Check for bullish BOS (price breaks above last 2 swing highs)
+        bullish_bos = current_high > last_swing_high and current_high > second_last_swing_high
+        
+        # Check for bearish BOS (price breaks below last 2 swing lows)
+        bearish_bos = current_low < last_swing_low and current_low < second_last_swing_low
+        
+        bos_detected = bullish_bos or bearish_bos
+        
+        if bullish_bos:
+            direction = "bullish"
+            structure_type = "bullish"
+            # Confidence based on how much price broke above
+            break_amount = min(current_high - last_swing_high, current_high - second_last_swing_high)
+            break_pct = (break_amount / last_swing_high) * 100 if last_swing_high > 0 else 0
+            confidence = "high" if break_pct > 1.0 else "moderate" if break_pct > 0.5 else "low"
+        elif bearish_bos:
+            direction = "bearish"
+            structure_type = "bearish"
+            break_amount = min(last_swing_low - current_low, second_last_swing_low - current_low)
+            break_pct = (break_amount / last_swing_low) * 100 if last_swing_low > 0 else 0
+            confidence = "high" if break_pct > 1.0 else "moderate" if break_pct > 0.5 else "low"
+        else:
+            direction = "neutral"
+            # Determine structure type based on swing relationships
+            if last_swing_high > second_last_swing_high and last_swing_low > second_last_swing_low:
+                structure_type = "bullish"
+            elif last_swing_high < second_last_swing_high and last_swing_low < second_last_swing_low:
+                structure_type = "bearish"
+            else:
+                structure_type = "neutral"
+            confidence = "none"
+        
+        return {
+            "bos_detected": bos_detected,
+            "direction": direction,
+            "last_swing_high": round(last_swing_high, 4),
+            "last_swing_low": round(last_swing_low, 4),
+            "structure_type": structure_type,
+            "confidence": confidence
+        }
+
 
 def calculate_all_indicators(klines: List[Dict]) -> Dict:
     """Calculate all indicators from kline data
@@ -1494,6 +1893,12 @@ def calculate_all_indicators(klines: List[Dict]) -> Dict:
     # ATR
     atr = engine.calculate_atr(klines, 14)
     
+    # Smart Money Concepts (SMC)
+    order_blocks = engine.detect_order_blocks(klines, atr_period=14, move_threshold=1.5)
+    fair_value_gaps = engine.detect_fair_value_gaps(klines, lookback=100)
+    liquidity_zones = engine.detect_liquidity_zones(klines, cluster_threshold_pct=0.5, min_cluster_size=2)
+    break_of_structure = engine.detect_break_of_structure(klines, lookback=50)
+    
     # Support/Resistance
     sr_levels = engine.find_support_resistance(klines, 3)
     
@@ -1548,6 +1953,10 @@ def calculate_all_indicators(klines: List[Dict]) -> Dict:
         "divergence": divergence,
         "bollinger": bollinger,
         "atr": atr,
+        "order_blocks": order_blocks,
+        "fair_value_gaps": fair_value_gaps,
+        "liquidity_zones": liquidity_zones,
+        "break_of_structure": break_of_structure,
         "support_resistance": sr_levels,
         "fibonacci": fib,
         "volume": volume,
@@ -1885,6 +2294,10 @@ def build_analysis_prompt(
     obv = indicators.get("obv", {})
     stoch_rsi = indicators.get("stoch_rsi", {})
     adx = indicators.get("adx", {})
+    order_blocks = indicators.get("order_blocks", {})
+    fair_value_gaps = indicators.get("fair_value_gaps", {})
+    liquidity_zones = indicators.get("liquidity_zones", {})
+    break_of_structure = indicators.get("break_of_structure", {})
     
     # Higher timeframe info
     htf_info = ""
@@ -1931,6 +2344,22 @@ OBV Trend: {obv.get('trend', 'neutral')} | Divergence: {obv.get('divergence', 'n
 === DETECTED SUPPORT/RESISTANCE ===
 Support Levels: {json.dumps(sr.get('support', []))}
 Resistance Levels: {json.dumps(sr.get('resistance', []))}
+
+=== SMART MONEY CONCEPTS (SMC) ===
+Order Blocks:
+  - Nearest Bullish OB: {json.dumps(indicators.get('order_blocks', {}).get('nearest_bullish', {}))}
+  - Nearest Bearish OB: {json.dumps(indicators.get('order_blocks', {}).get('nearest_bearish', {}))}
+Fair Value Gaps:
+  - Nearest FVG: {json.dumps(indicators.get('fair_value_gaps', {}).get('nearest_fvg', {}))}
+  - Unfilled FVGs: {len(indicators.get('fair_value_gaps', {}).get('unfilled_fvg', []))} unfilled gaps
+Liquidity Zones:
+  - Strongest Above: {json.dumps(indicators.get('liquidity_zones', {}).get('strongest_above', {}))}
+  - Strongest Below: {json.dumps(indicators.get('liquidity_zones', {}).get('strongest_below', {}))}
+Break of Structure:
+  - BOS Detected: {indicators.get('break_of_structure', {}).get('bos_detected', False)}
+  - Direction: {indicators.get('break_of_structure', {}).get('direction', 'neutral')}
+  - Structure Type: {indicators.get('break_of_structure', {}).get('structure_type', 'neutral')}
+  - Confidence: {indicators.get('break_of_structure', {}).get('confidence', 'none')}
 
 === ORDER BOOK DATA ===
 Largest Bid Wall: ${depth_data.get('largest_bid_wall', {}).get('price', 0):,.4f} ({depth_data.get('largest_bid_wall', {}).get('quantity', 0):,.2f} units)
@@ -1979,20 +2408,28 @@ If you identify ANY pattern:
 3. Rate its reliability (strong/moderate/weak)
 4. Note the pattern's completion status (forming/completed/failed)
 
-STEP 4: SUPPORT/RESISTANCE ANALYSIS
+STEP 4: SUPPORT/RESISTANCE & SMART MONEY CONCEPTS ANALYSIS
 Identify where price might bounce (support) or get rejected (resistance).
+Analyze Smart Money Concepts:
+- Order Blocks: Institutional entry zones (bullish OB below price, bearish OB above price)
+- Fair Value Gaps: Price imbalances likely to be filled (unfilled gaps are more significant)
+- Liquidity Zones: Areas where stop losses cluster (price often moves to these zones)
+- Break of Structure: Trend changes when price breaks above/below last swing points (bullish BOS = bullish, bearish BOS = bearish)
 
 STEP 5: CONFLUENCE SCORING
 Score each indicator 0-100 based on how bullish it is, then multiply by weight:
-- Chart Pattern: weight 15%
-- S/R Levels: weight 20%
+- Chart Pattern: weight 12%
+- S/R Levels: weight 12%
+- Order Blocks: weight 8%
+- Liquidity Zones: weight 5%
+- Break of Structure: weight 5%
 - Divergence: weight 8%
 - RSI: weight 10%
 - MACD: weight 10%
 - EMA Alignment: weight 10%
 - Price vs EMA: weight 8%
-- Fibonacci: weight 8%
-- Bollinger: weight 8%
+- Fibonacci: weight 6%
+- Bollinger: weight 6%
 - Volume: weight 3%
 
 STEP 6: TRADE RECOMMENDATION
@@ -2056,7 +2493,7 @@ Return ONLY valid JSON with this exact structure:
 }}
 
 CRITICAL RULES:
-1. CAREFULLY examine the chart for patterns - this is worth 15% of confluence score
+1. CAREFULLY examine the chart for patterns - this is worth 12% of confluence score
 2. Use the EXACT indicator values provided above for analysis
 3. Divergence detection: Bullish divergence = high score (80-100), Bearish = low score (0-20), None = 50
 4. confluence_score MUST equal sum of all weighted_scores (totaling 100%)
@@ -2433,20 +2870,52 @@ def generate_fallback_analysis(indicators: Dict, price_data: Dict, higher_tf_tre
     bb = indicators.get("bollinger", {})
     obv = indicators.get("obv", {})
     divergence = indicators.get("divergence", {})
+    order_blocks = indicators.get("order_blocks", {})
+    liquidity_zones = indicators.get("liquidity_zones", {})
+    break_of_structure = indicators.get("break_of_structure", {})
     
-    # Simple confluence scoring with updated weights
+    # Simple confluence scoring with updated weights (hybrid approach)
     score = 50  # Start neutral
     breakdown = {}
     
-    # Chart Pattern (15%) - No pattern in fallback
+    # Chart Pattern (12% - reduced from 15%)
     pattern_score = 50
-    breakdown["Chart Pattern"] = round(pattern_score * 0.15, 1)
-    score += (pattern_score - 50) * 0.15
+    breakdown["Chart Pattern"] = round(pattern_score * 0.12, 1)
+    score += (pattern_score - 50) * 0.12
     
-    # S/R Levels (20% - increased)
+    # S/R Levels (12% - reduced from 20%)
     sr_score = 60 if supports else 50
-    breakdown["S/R Levels"] = round(sr_score * 0.20, 1)
-    score += (sr_score - 50) * 0.20
+    breakdown["S/R Levels"] = round(sr_score * 0.12, 1)
+    score += (sr_score - 50) * 0.12
+    
+    # Order Blocks (8% - NEW)
+    ob_score = 50
+    nearest_bullish_ob = order_blocks.get("nearest_bullish", {})
+    if nearest_bullish_ob.get("is_valid") and nearest_bullish_ob.get("low", 0) < current_price * 1.05:
+        ob_score = 70  # Bullish OB nearby
+    breakdown["Order Blocks"] = round(ob_score * 0.08, 1)
+    score += (ob_score - 50) * 0.08
+    
+    # Liquidity Zones (5% - NEW)
+    lz_score = 50
+    strongest_above = liquidity_zones.get("strongest_above", {})
+    strongest_below = liquidity_zones.get("strongest_below", {})
+    if strongest_above.get("strength") == "strong":
+        lz_score = 55  # Strong liquidity above (bullish target)
+    breakdown["Liquidity Zones"] = round(lz_score * 0.05, 1)
+    score += (lz_score - 50) * 0.05
+    
+    # Break of Structure (5% - NEW)
+    bos_score = 50
+    if break_of_structure.get("bos_detected"):
+        if break_of_structure.get("direction") == "bullish":
+            bos_score = 80
+        elif break_of_structure.get("direction") == "bearish":
+            bos_score = 20
+    elif break_of_structure.get("structure_type") == "bullish":
+        bos_score = 60  # Bullish structure but no break yet
+    breakdown["Break of Structure"] = round(bos_score * 0.05, 1)
+    score += (bos_score - 50) * 0.05
     
     # Divergence (8%)
     if divergence.get("signal") == "bullish":
@@ -2498,20 +2967,20 @@ def generate_fallback_analysis(indicators: Dict, price_data: Dict, higher_tf_tre
     breakdown["Price vs EMA"] = round(pve_score * 0.08, 1)
     score += (pve_score - 50) * 0.08
     
-    # Fibonacci (8%)
+    # Fibonacci (6% - reduced from 8%)
     fib_score = 55
-    breakdown["Fibonacci"] = round(fib_score * 0.08, 1)
-    score += (fib_score - 50) * 0.08
+    breakdown["Fibonacci"] = round(fib_score * 0.06, 1)
+    score += (fib_score - 50) * 0.06
     
-    # Bollinger (8%)
+    # Bollinger (6% - reduced from 8%)
     if bb.get("position") == "lower_band":
         bb_score = 75
     elif bb.get("position") == "upper_band":
         bb_score = 25
     else:
         bb_score = 50
-    breakdown["Bollinger"] = round(bb_score * 0.08, 1)
-    score += (bb_score - 50) * 0.08
+    breakdown["Bollinger"] = round(bb_score * 0.06, 1)
+    score += (bb_score - 50) * 0.06
     
     # Volume (3%)
     if vol.get("trend") == "bullish":
@@ -2544,8 +3013,8 @@ def generate_fallback_analysis(indicators: Dict, price_data: Dict, higher_tf_tre
             "status": "none", 
             "description": "No pattern detected in fallback analysis", 
             "score": 50, 
-            "weight": 15, 
-            "weighted_score": breakdown.get("Chart Pattern", 7.5)
+            "weight": 12, 
+            "weighted_score": breakdown.get("Chart Pattern", 6.0)
         },
         "trend_analysis": {
             "trend": indicators.get("trend", "neutral"), 
