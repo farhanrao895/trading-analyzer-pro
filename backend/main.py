@@ -622,35 +622,45 @@ class IndicatorEngine:
     
     @staticmethod
     def calculate_rsi(closes: List[float], period: int = 14) -> Dict:
-        """RSI (Relative Strength Index) - Wilder's smoothing"""
-        if len(closes) < period + 1:
-            return {"value": 50.0, "signal": "neutral"}
+        """RSI (Relative Strength Index) - TradingView Compatible
         
+        Uses Wilder's RMA with α = 1/period (NOT standard EMA α = 2/(period+1))
+        First RMA value = SMA of first `period` values (seed)
+        Subsequent: RMA = (previous_RMA × (period - 1) + current) / period
+        """
+        if len(closes) < period + 1:
+            return {"value": 50.0, "signal": "neutral", "period": period}
+        
+        # Calculate price changes
         deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
         
-        gains = []
-        losses = []
-        for d in deltas:
-            gains.append(d if d > 0 else 0)
-            losses.append(-d if d < 0 else 0)
+        # Separate gains and losses
+        gains = [max(d, 0) for d in deltas]
+        losses = [abs(min(d, 0)) for d in deltas]
         
-        # Initial average
+        # First average = SMA of first `period` values (TradingView seed method)
         avg_gain = sum(gains[:period]) / period
         avg_loss = sum(losses[:period]) / period
         
-        # Wilder's smoothing
+        # Wilder's smoothing (RMA) for subsequent values
+        # Formula: RMA = (prev_RMA * (period - 1) + current) / period
+        # This is equivalent to: RMA = prev_RMA + (current - prev_RMA) / period
         for i in range(period, len(gains)):
             avg_gain = (avg_gain * (period - 1) + gains[i]) / period
             avg_loss = (avg_loss * (period - 1) + losses[i]) / period
         
+        # Handle edge cases exactly like TradingView
         if avg_loss == 0:
-            rsi = 100.0
+            rsi = 100.0 if avg_gain > 0 else 50.0  # No movement = neutral
+        elif avg_gain == 0:
+            rsi = 0.0
         else:
             rs = avg_gain / avg_loss
-            rsi = 100 - (100 / (1 + rs))
+            rsi = 100.0 - (100.0 / (1.0 + rs))
         
         rsi = round(rsi, 2)
         
+        # Signal determination
         if rsi < 30:
             signal = "oversold"
         elif rsi > 70:
@@ -774,24 +784,36 @@ class IndicatorEngine:
     
     @staticmethod
     def find_peaks_and_troughs(values: List[float], lookback: int = 5) -> tuple:
-        """Find peaks (local maxima) and troughs (local minima)"""
+        """Find peaks (local maxima) and troughs (local minima) using Williams Fractals approach
+        
+        A valid fractal requires `lookback` bars on each side with lower highs (for peaks)
+        or higher lows (for troughs). This matches TradingView's fractal detection.
+        
+        Args:
+            values: List of price or indicator values
+            lookback: Number of bars on each side to confirm (default 5, minimum 2)
+        
+        Returns:
+            Tuple of (peaks, troughs) where each is a list of (index, value) tuples
+        """
+        lookback = max(2, lookback)  # Minimum 2 bars each side
         peaks = []
         troughs = []
         
         for i in range(lookback, len(values) - lookback):
-            # Check for peak
+            # Check for peak (fractal high)
             is_peak = True
-            for j in range(i - lookback, i + lookback + 1):
-                if j != i and values[j] >= values[i]:
+            for j in range(1, lookback + 1):
+                if values[i - j] >= values[i] or values[i + j] >= values[i]:
                     is_peak = False
                     break
             if is_peak:
                 peaks.append((i, values[i]))
             
-            # Check for trough
+            # Check for trough (fractal low)
             is_trough = True
-            for j in range(i - lookback, i + lookback + 1):
-                if j != i and values[j] <= values[i]:
+            for j in range(1, lookback + 1):
+                if values[i - j] <= values[i] or values[i + j] <= values[i]:
                     is_trough = False
                     break
             if is_trough:
@@ -800,73 +822,115 @@ class IndicatorEngine:
         return peaks, troughs
     
     @staticmethod
-    def detect_divergence(prices: List[float], indicator_values: List[float], lookback: int = 20) -> Dict:
-        """Detect bullish/bearish divergences between price and indicator (RSI/MACD)"""
-        if len(prices) < lookback * 2 or len(indicator_values) < lookback * 2:
+    def detect_divergence(prices: List[float], indicator_values: List[float], lookback: int = 50) -> Dict:
+        """Detect bullish/bearish divergences - Professional Implementation
+        
+        Uses Williams Fractals for swing detection with proper filtering:
+        - Minimum 5 bars between swings
+        - Maximum 60 bars between swings  
+        - Minimum indicator difference of 3 points (for RSI 0-100 scale)
+        - Line-of-sight validation
+        
+        Args:
+            prices: List of closing prices
+            indicator_values: List of indicator values (RSI, MACD histogram, etc.)
+            lookback: Number of recent bars to analyze (default 50)
+        
+        Returns:
+            Dict with divergence type, signal, and strength
+        """
+        if len(prices) < lookback or len(indicator_values) < lookback:
             return {"type": "none", "signal": "neutral", "strength": "none"}
         
-        # Get recent data
-        recent_prices = prices[-lookback:]
-        recent_indicators = indicator_values[-lookback:]
+        # Ensure same length
+        min_len = min(len(prices), len(indicator_values))
+        recent_prices = prices[-min(lookback, min_len):]
+        recent_indicators = indicator_values[-min(lookback, min_len):]
         
-        # Find peaks and troughs in both
-        price_peaks, price_troughs = IndicatorEngine.find_peaks_and_troughs(recent_prices, lookback=3)
-        ind_peaks, ind_troughs = IndicatorEngine.find_peaks_and_troughs(recent_indicators, lookback=3)
+        # Find peaks and troughs with proper lookback (5 bars each side)
+        price_peaks, price_troughs = IndicatorEngine.find_peaks_and_troughs(recent_prices, lookback=5)
+        ind_peaks, ind_troughs = IndicatorEngine.find_peaks_and_troughs(recent_indicators, lookback=5)
         
         divergence_type = "none"
         signal = "neutral"
         strength = "none"
         
-        # Check for bullish divergence (price makes lower low, indicator makes higher low)
+        # Filtering parameters
+        MIN_BARS_BETWEEN = 5
+        MAX_BARS_BETWEEN = 60
+        MIN_INDICATOR_DIFF = 3  # For RSI (0-100 scale)
+        
+        # Check for BULLISH DIVERGENCE (price lower low, indicator higher low)
         if len(price_troughs) >= 2 and len(ind_troughs) >= 2:
-            # Compare last two troughs
-            price_trough1 = price_troughs[-2][1]  # Earlier trough
-            price_trough2 = price_troughs[-1][1]   # Recent trough
-            ind_trough1 = ind_troughs[-2][1]
-            ind_trough2 = ind_troughs[-1][1]
+            # Get last two troughs
+            pt1_idx, pt1_val = price_troughs[-2]
+            pt2_idx, pt2_val = price_troughs[-1]
+            it1_idx, it1_val = ind_troughs[-2]
+            it2_idx, it2_val = ind_troughs[-1]
             
-            if price_trough2 < price_trough1 and ind_trough2 > ind_trough1:
-                divergence_type = "bullish_regular"
-                signal = "bullish"
-                strength = "strong" if (ind_trough2 - ind_trough1) > (price_trough1 - price_trough2) * 0.1 else "moderate"
+            bars_between = pt2_idx - pt1_idx
+            
+            # Apply filters
+            if MIN_BARS_BETWEEN <= bars_between <= MAX_BARS_BETWEEN:
+                indicator_diff = abs(it2_val - it1_val)
+                
+                if indicator_diff >= MIN_INDICATOR_DIFF:
+                    # Regular bullish: Price lower low, indicator higher low
+                    if pt2_val < pt1_val and it2_val > it1_val:
+                        # Line-of-sight check: No intermediate trough lower than both
+                        intermediate_valid = True
+                        for idx, val in price_troughs:
+                            if pt1_idx < idx < pt2_idx and val < min(pt1_val, pt2_val):
+                                intermediate_valid = False
+                                break
+                        
+                        if intermediate_valid:
+                            divergence_type = "bullish_regular"
+                            signal = "bullish"
+                            # Strength based on indicator difference
+                            strength = "strong" if indicator_diff >= 10 else "moderate" if indicator_diff >= 5 else "weak"
+                    
+                    # Hidden bullish: Price higher low, indicator lower low
+                    elif pt2_val > pt1_val and it2_val < it1_val:
+                        if divergence_type == "none":
+                            divergence_type = "bullish_hidden"
+                            signal = "bullish"
+                            strength = "moderate"
         
-        # Check for bearish divergence (price makes higher high, indicator makes lower high)
-        if len(price_peaks) >= 2 and len(ind_peaks) >= 2:
-            price_peak1 = price_peaks[-2][1]
-            price_peak2 = price_peaks[-1][1]
-            ind_peak1 = ind_peaks[-2][1]
-            ind_peak2 = ind_peaks[-1][1]
+        # Check for BEARISH DIVERGENCE (price higher high, indicator lower high)
+        if len(price_peaks) >= 2 and len(ind_peaks) >= 2 and divergence_type == "none":
+            # Get last two peaks
+            pp1_idx, pp1_val = price_peaks[-2]
+            pp2_idx, pp2_val = price_peaks[-1]
+            ip1_idx, ip1_val = ind_peaks[-2]
+            ip2_idx, ip2_val = ind_peaks[-1]
             
-            if price_peak2 > price_peak1 and ind_peak2 < ind_peak1:
-                divergence_type = "bearish_regular"
-                signal = "bearish"
-                strength = "strong" if (ind_peak1 - ind_peak2) > (price_peak2 - price_peak1) * 0.1 else "moderate"
-        
-        # Check for hidden bullish divergence (price makes higher low, indicator makes lower low)
-        if len(price_troughs) >= 2 and len(ind_troughs) >= 2:
-            price_trough1 = price_troughs[-2][1]
-            price_trough2 = price_troughs[-1][1]
-            ind_trough1 = ind_troughs[-2][1]
-            ind_trough2 = ind_troughs[-1][1]
+            bars_between = pp2_idx - pp1_idx
             
-            if price_trough2 > price_trough1 and ind_trough2 < ind_trough1:
-                if divergence_type == "none":  # Only set if no regular divergence found
-                    divergence_type = "bullish_hidden"
-                    signal = "bullish"
-                    strength = "moderate"
-        
-        # Check for hidden bearish divergence (price makes lower high, indicator makes higher high)
-        if len(price_peaks) >= 2 and len(ind_peaks) >= 2:
-            price_peak1 = price_peaks[-2][1]
-            price_peak2 = price_peaks[-1][1]
-            ind_peak1 = ind_peaks[-2][1]
-            ind_peak2 = ind_peaks[-1][1]
-            
-            if price_peak2 < price_peak1 and ind_peak2 > ind_peak1:
-                if divergence_type == "none":
-                    divergence_type = "bearish_hidden"
-                    signal = "bearish"
-                    strength = "moderate"
+            # Apply filters
+            if MIN_BARS_BETWEEN <= bars_between <= MAX_BARS_BETWEEN:
+                indicator_diff = abs(ip2_val - ip1_val)
+                
+                if indicator_diff >= MIN_INDICATOR_DIFF:
+                    # Regular bearish: Price higher high, indicator lower high
+                    if pp2_val > pp1_val and ip2_val < ip1_val:
+                        # Line-of-sight check
+                        intermediate_valid = True
+                        for idx, val in price_peaks:
+                            if pp1_idx < idx < pp2_idx and val > max(pp1_val, pp2_val):
+                                intermediate_valid = False
+                                break
+                        
+                        if intermediate_valid:
+                            divergence_type = "bearish_regular"
+                            signal = "bearish"
+                            strength = "strong" if indicator_diff >= 10 else "moderate" if indicator_diff >= 5 else "weak"
+                    
+                    # Hidden bearish: Price lower high, indicator higher high
+                    elif pp2_val < pp1_val and ip2_val > ip1_val:
+                        divergence_type = "bearish_hidden"
+                        signal = "bearish"
+                        strength = "moderate"
         
         return {
             "type": divergence_type,
@@ -876,9 +940,10 @@ class IndicatorEngine:
     
     @staticmethod
     def calculate_bollinger(closes: List[float], period: int = 20, std_dev: float = 2.0) -> Dict:
-        """Bollinger Bands - TradingView compatible
+        """Bollinger Bands - TradingView Compatible
         
-        Uses sample standard deviation (dividing by period - 1) to match TradingView.
+        Uses POPULATION standard deviation (divides by N, not N-1)
+        This is confirmed by John Bollinger himself.
         """
         if len(closes) < period:
             price = closes[-1] if closes else 0
@@ -887,13 +952,10 @@ class IndicatorEngine:
         # Calculate SMA (middle band)
         sma = sum(closes[-period:]) / float(period)
         
-        # Calculate sample standard deviation (TradingView uses sample, not population)
-        # Sample std dev divides by (period - 1), not period
-        if period > 1:
-            variance = sum((p - sma) ** 2 for p in closes[-period:]) / float(period - 1)
-            std = math.sqrt(variance)
-        else:
-            std = 0.0
+        # Calculate POPULATION standard deviation (TradingView uses biased=true by default)
+        # Population std dev divides by N, not N-1
+        variance = sum((p - sma) ** 2 for p in closes[-period:]) / float(period)
+        std = math.sqrt(variance)
         
         upper = sma + std_dev * std
         lower = sma - std_dev * std
@@ -1094,14 +1156,15 @@ class IndicatorEngine:
     
     @staticmethod
     def calculate_obv(klines: List[Dict]) -> Dict:
-        """On-Balance Volume (OBV) indicator
+        """On-Balance Volume (OBV) - TradingView Compatible
         
-        OBV accumulates volume based on price direction:
-        - If close > previous close: OBV = Previous OBV + Current Volume
-        - If close < previous close: OBV = Previous OBV - Current Volume
-        - If close == previous close: OBV = Previous OBV (unchanged)
+        Rules:
+        - If close > prev_close: OBV = prev_OBV + volume
+        - If close < prev_close: OBV = prev_OBV - volume  
+        - If close = prev_close: OBV = prev_OBV (unchanged)
         
-        Returns OBV value, trend, and divergence detection.
+        Starting value: First bar's volume (positive or negative based on implicit direction)
+        TradingView uses: cumsum(sign(change(close)) * volume)
         """
         if len(klines) < 2:
             return {"obv": 0, "trend": "neutral", "divergence": "none", "signal": "neutral"}
@@ -1109,8 +1172,10 @@ class IndicatorEngine:
         closes = [k["close"] for k in klines]
         volumes = [k.get("volume", 0) for k in klines]
         
-        # Calculate OBV series
-        obv_series = [volumes[0]]  # Initialize with first period's volume
+        # TradingView OBV calculation
+        # First value: We need at least 2 bars to determine direction
+        # Start OBV at 0, then accumulate based on price direction
+        obv_series = [0]  # First bar has no previous reference, start at 0
         
         for i in range(1, len(closes)):
             if closes[i] > closes[i-1]:
@@ -1118,7 +1183,7 @@ class IndicatorEngine:
             elif closes[i] < closes[i-1]:
                 obv_series.append(obv_series[-1] - volumes[i])
             else:
-                obv_series.append(obv_series[-1])  # Unchanged
+                obv_series.append(obv_series[-1])  # Unchanged when price unchanged
         
         current_obv = obv_series[-1]
         
@@ -1127,7 +1192,12 @@ class IndicatorEngine:
         if lookback >= 2:
             obv_start = obv_series[-lookback]
             obv_end = obv_series[-1]
-            obv_change_pct = ((obv_end - obv_start) / abs(obv_start)) * 100 if obv_start != 0 else 0
+            
+            # Avoid division by zero
+            if obv_start != 0:
+                obv_change_pct = ((obv_end - obv_start) / abs(obv_start)) * 100
+            else:
+                obv_change_pct = 100 if obv_end > 0 else (-100 if obv_end < 0 else 0)
             
             if obv_change_pct > 5:
                 obv_trend = "increasing"
@@ -1137,6 +1207,7 @@ class IndicatorEngine:
                 obv_trend = "neutral"
         else:
             obv_trend = "neutral"
+            obv_change_pct = 0
         
         # Check for OBV vs Price divergence
         divergence = "none"
@@ -1145,24 +1216,24 @@ class IndicatorEngine:
         if lookback >= 5:
             price_start = closes[-lookback]
             price_end = closes[-1]
-            price_change_pct = ((price_end - price_start) / price_start) * 100 if price_start != 0 else 0
             
-            obv_start_div = obv_series[-lookback]
-            obv_end_div = obv_series[-1]
-            obv_change_div = ((obv_end_div - obv_start_div) / abs(obv_start_div)) * 100 if obv_start_div != 0 else 0
+            if price_start != 0:
+                price_change_pct = ((price_end - price_start) / price_start) * 100
+            else:
+                price_change_pct = 0
             
             # Bullish divergence: Price down, OBV up
-            if price_change_pct < -2 and obv_change_div > 3:
+            if price_change_pct < -2 and obv_change_pct > 3:
                 divergence = "bullish"
                 signal = "bullish"
             # Bearish divergence: Price up, OBV down
-            elif price_change_pct > 2 and obv_change_div < -3:
+            elif price_change_pct > 2 and obv_change_pct < -3:
                 divergence = "bearish"
                 signal = "bearish"
             # Confirmation: Both moving same direction
-            elif price_change_pct > 2 and obv_change_div > 3:
+            elif price_change_pct > 2 and obv_change_pct > 3:
                 signal = "bullish"
-            elif price_change_pct < -2 and obv_change_div < -3:
+            elif price_change_pct < -2 and obv_change_pct < -3:
                 signal = "bearish"
         
         return {
@@ -1170,6 +1241,176 @@ class IndicatorEngine:
             "trend": obv_trend,
             "divergence": divergence,
             "signal": signal
+        }
+
+    @staticmethod
+    def calculate_stoch_rsi(closes: List[float], rsi_period: int = 14, stoch_period: int = 14, 
+                            smooth_k: int = 3, smooth_d: int = 3) -> Dict:
+        """Stochastic RSI - TradingView Compatible
+        
+        Formula:
+        1. Calculate RSI
+        2. Apply Stochastic formula to RSI values
+        3. Smooth with SMA for %K and %D lines
+        
+        Default parameters: 14, 14, 3, 3 (matching TradingView)
+        First valid value appears at bar: rsi_period + stoch_period - 1 = 27
+        """
+        if len(closes) < rsi_period + stoch_period:
+            return {"k": 50.0, "d": 50.0, "signal": "neutral"}
+        
+        # Step 1: Calculate RSI series
+        rsi_values = []
+        for i in range(rsi_period, len(closes)):
+            subset = closes[:i+1]
+            rsi_data = IndicatorEngine.calculate_rsi(subset, rsi_period)
+            rsi_values.append(rsi_data["value"])
+        
+        if len(rsi_values) < stoch_period:
+            return {"k": 50.0, "d": 50.0, "signal": "neutral"}
+        
+        # Step 2: Calculate Stochastic of RSI
+        stoch_rsi_values = []
+        for i in range(stoch_period - 1, len(rsi_values)):
+            window = rsi_values[i - stoch_period + 1:i + 1]
+            highest_rsi = max(window)
+            lowest_rsi = min(window)
+            
+            if highest_rsi == lowest_rsi:
+                stoch_rsi = 50.0  # Neutral when no range
+            else:
+                stoch_rsi = ((rsi_values[i] - lowest_rsi) / (highest_rsi - lowest_rsi)) * 100
+            
+            stoch_rsi_values.append(stoch_rsi)
+        
+        if len(stoch_rsi_values) < smooth_k:
+            return {"k": 50.0, "d": 50.0, "signal": "neutral"}
+        
+        # Step 3: Smooth %K with SMA
+        k_values = []
+        for i in range(smooth_k - 1, len(stoch_rsi_values)):
+            k_sma = sum(stoch_rsi_values[i - smooth_k + 1:i + 1]) / smooth_k
+            k_values.append(k_sma)
+        
+        if len(k_values) < smooth_d:
+            return {"k": k_values[-1] if k_values else 50.0, "d": 50.0, "signal": "neutral"}
+        
+        # Step 4: Smooth %D with SMA of %K
+        d_value = sum(k_values[-smooth_d:]) / smooth_d
+        k_value = k_values[-1]
+        
+        # Determine signal
+        if k_value < 20 and d_value < 20:
+            signal = "oversold"
+        elif k_value > 80 and d_value > 80:
+            signal = "overbought"
+        elif k_value > d_value and k_value < 50:
+            signal = "bullish_cross"
+        elif k_value < d_value and k_value > 50:
+            signal = "bearish_cross"
+        else:
+            signal = "neutral"
+        
+        return {
+            "k": round(k_value, 2),
+            "d": round(d_value, 2),
+            "signal": signal
+        }
+
+    @staticmethod
+    def calculate_adx(klines: List[Dict], period: int = 14) -> Dict:
+        """ADX (Average Directional Index) - TradingView Compatible
+        
+        Uses Wilder's smoothing (RMA) for all components.
+        ADX measures trend strength (not direction):
+        - ADX > 25: Strong trend
+        - ADX < 20: Weak/no trend (ranging market)
+        
+        Also returns +DI and -DI for trend direction.
+        """
+        if len(klines) < period + 1:
+            return {"adx": 0, "plus_di": 0, "minus_di": 0, "trend_strength": "weak"}
+        
+        # Calculate +DM, -DM, and TR
+        plus_dm_list = []
+        minus_dm_list = []
+        tr_list = []
+        
+        for i in range(1, len(klines)):
+            high = klines[i]["high"]
+            low = klines[i]["low"]
+            prev_high = klines[i-1]["high"]
+            prev_low = klines[i-1]["low"]
+            prev_close = klines[i-1]["close"]
+            
+            # Directional Movement
+            up_move = high - prev_high
+            down_move = prev_low - low
+            
+            plus_dm = up_move if (up_move > down_move and up_move > 0) else 0
+            minus_dm = down_move if (down_move > up_move and down_move > 0) else 0
+            
+            plus_dm_list.append(plus_dm)
+            minus_dm_list.append(minus_dm)
+            
+            # True Range
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            tr_list.append(tr)
+        
+        if len(tr_list) < period:
+            return {"adx": 0, "plus_di": 0, "minus_di": 0, "trend_strength": "weak"}
+        
+        # Wilder's smoothing for ATR, +DM, -DM (seed with SMA)
+        atr = sum(tr_list[:period]) / period
+        smooth_plus_dm = sum(plus_dm_list[:period]) / period
+        smooth_minus_dm = sum(minus_dm_list[:period]) / period
+        
+        dx_values = []
+        
+        for i in range(period, len(tr_list)):
+            # Wilder's smoothing
+            atr = (atr * (period - 1) + tr_list[i]) / period
+            smooth_plus_dm = (smooth_plus_dm * (period - 1) + plus_dm_list[i]) / period
+            smooth_minus_dm = (smooth_minus_dm * (period - 1) + minus_dm_list[i]) / period
+            
+            # Calculate +DI and -DI
+            plus_di = (smooth_plus_dm / atr * 100) if atr > 0 else 0
+            minus_di = (smooth_minus_dm / atr * 100) if atr > 0 else 0
+            
+            # Calculate DX
+            di_sum = plus_di + minus_di
+            if di_sum > 0:
+                dx = abs(plus_di - minus_di) / di_sum * 100
+            else:
+                dx = 0
+            dx_values.append(dx)
+        
+        if len(dx_values) < period:
+            return {"adx": 0, "plus_di": 0, "minus_di": 0, "trend_strength": "weak"}
+        
+        # ADX = Wilder's smoothed DX
+        adx = sum(dx_values[:period]) / period
+        for i in range(period, len(dx_values)):
+            adx = (adx * (period - 1) + dx_values[i]) / period
+        
+        # Final +DI and -DI
+        final_plus_di = (smooth_plus_dm / atr * 100) if atr > 0 else 0
+        final_minus_di = (smooth_minus_dm / atr * 100) if atr > 0 else 0
+        
+        # Determine trend strength
+        if adx >= 25:
+            trend_strength = "strong"
+        elif adx >= 20:
+            trend_strength = "moderate"
+        else:
+            trend_strength = "weak"
+        
+        return {
+            "adx": round(adx, 2),
+            "plus_di": round(final_plus_di, 2),
+            "minus_di": round(final_minus_di, 2),
+            "trend_strength": trend_strength,
+            "trend_direction": "bullish" if final_plus_di > final_minus_di else "bearish"
         }
 
 
@@ -1192,6 +1433,12 @@ def calculate_all_indicators(klines: List[Dict]) -> Dict:
     
     # RSI
     rsi = engine.calculate_rsi(closes, 14)
+    
+    # Stochastic RSI (NEW)
+    stoch_rsi = engine.calculate_stoch_rsi(closes, 14, 14, 3, 3)
+    
+    # ADX (NEW)
+    adx = engine.calculate_adx(klines, 14)
     
     # EMAs
     ema20 = engine.calculate_ema(closes, 20)
@@ -1230,9 +1477,9 @@ def calculate_all_indicators(klines: List[Dict]) -> Dict:
         macd_data = engine.calculate_macd(closes[:i+1])
         macd_histogram_values.append(macd_data["histogram"])
     
-    # Detect divergences
-    rsi_divergence = engine.detect_divergence(closes, rsi_values, lookback=30) if len(rsi_values) >= 30 else {"type": "none", "signal": "neutral", "strength": "none"}
-    macd_divergence = engine.detect_divergence(closes, macd_histogram_values, lookback=30) if len(macd_histogram_values) >= 30 else {"type": "none", "signal": "neutral", "strength": "none"}
+    # Detect divergences (using default lookback=50 from detect_divergence)
+    rsi_divergence = engine.detect_divergence(closes, rsi_values, lookback=50) if len(rsi_values) >= 50 else {"type": "none", "signal": "neutral", "strength": "none"}
+    macd_divergence = engine.detect_divergence(closes, macd_histogram_values, lookback=50) if len(macd_histogram_values) >= 50 else {"type": "none", "signal": "neutral", "strength": "none"}
     
     # Combine divergences (prioritize RSI if both exist)
     divergence = rsi_divergence if rsi_divergence["type"] != "none" else macd_divergence
@@ -1288,6 +1535,8 @@ def calculate_all_indicators(klines: List[Dict]) -> Dict:
     return {
         "current_price": current_price,
         "rsi": rsi,
+        "stoch_rsi": stoch_rsi,
+        "adx": adx,
         "ema": {
             "ema20": ema20,
             "ema50": ema50,
