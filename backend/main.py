@@ -460,8 +460,10 @@ async def get_klines(symbol: str, interval: str, limit: int = Query(default=500,
     
     # 1. Try OKX first (has better kline data than CoinGecko)
     print(f"Fetching klines for {symbol} {interval} from OKX...")
-    klines = await fetch_okx_klines(symbol, interval, min(limit, 100))
+    klines = await fetch_okx_klines(symbol, interval, min(limit, 500))
     if klines and len(klines) > 0:
+        # Ensure chronological order (oldest to newest)
+        klines.sort(key=lambda x: x["open_time"])
         print(f"Got {len(klines)} klines from OKX")
         return {"symbol": symbol, "interval": interval, "klines": klines, "source": "okx"}
     
@@ -470,6 +472,8 @@ async def get_klines(symbol: str, interval: str, limit: int = Query(default=500,
     days = INTERVAL_TO_DAYS.get(interval.lower(), 1)
     cg_klines = await fetch_coingecko_ohlc(symbol, days)
     if cg_klines and len(cg_klines) > 0:
+        # Ensure chronological order (oldest to newest)
+        cg_klines.sort(key=lambda x: x["open_time"])
         print(f"Got {len(cg_klines)} klines from CoinGecko")
         return {"symbol": symbol, "interval": interval, "klines": cg_klines, "source": "coingecko"}
     
@@ -480,7 +484,7 @@ async def get_klines(symbol: str, interval: str, limit: int = Query(default=500,
         "category": "spot",
         "symbol": symbol,
         "interval": bybit_interval,
-        "limit": min(limit, 200)
+        "limit": min(limit, 500)
     })
     if data and data.get("list"):
         klines = []
@@ -496,6 +500,8 @@ async def get_klines(symbol: str, interval: str, limit: int = Query(default=500,
                 "quote_volume": float(k[6]) if len(k) > 6 else float(k[5]) * float(k[4]),
                 "trades": 0
             })
+        # Ensure chronological order (oldest to newest)
+        klines.sort(key=lambda x: x["open_time"])
         print(f"Got {len(klines)} klines from Bybit")
         return {"symbol": symbol, "interval": interval, "klines": klines, "source": "bybit"}
     
@@ -504,7 +510,7 @@ async def get_klines(symbol: str, interval: str, limit: int = Query(default=500,
     data = await fetch_binance("klines", {
         "symbol": symbol,
         "interval": interval,
-        "limit": limit
+        "limit": min(limit, 1000)  # Binance allows up to 1000
     })
     if data:
         klines = []
@@ -520,6 +526,8 @@ async def get_klines(symbol: str, interval: str, limit: int = Query(default=500,
                 "quote_volume": float(k[7]),
                 "trades": k[8]
             })
+        # Binance returns in chronological order, but ensure it's sorted
+        klines.sort(key=lambda x: x["open_time"])
         print(f"Got {len(klines)} klines from Binance")
         return {"symbol": symbol, "interval": interval, "klines": klines, "source": "binance"}
     
@@ -654,39 +662,51 @@ class IndicatorEngine:
     
     @staticmethod
     def calculate_ema(closes: List[float], period: int) -> float:
-        """EMA (Exponential Moving Average)"""
+        """EMA (Exponential Moving Average) - TradingView compatible
+        
+        Formula matches TradingView's ema() function:
+        - Multiplier = 2 / (period + 1)
+        - Initial value = SMA of first period values
+        - Subsequent: EMA = (Price × Multiplier) + (Previous EMA × (1 - Multiplier))
+        """
         if len(closes) < period:
             return closes[-1] if closes else 0
         
-        multiplier = 2 / (period + 1)
+        # TradingView uses: multiplier = 2 / (period + 1)
+        multiplier = 2.0 / (period + 1.0)
         
-        # Start with SMA for first EMA value
-        ema = sum(closes[:period]) / period
+        # Start with SMA of first period values (TradingView standard)
+        ema = sum(closes[:period]) / float(period)
         
-        # Calculate EMA for rest of data
+        # Calculate EMA for rest of data using TradingView's exact formula
         for price in closes[period:]:
-            ema = (price - ema) * multiplier + ema
+            # Equivalent formulas:
+            # ema = (price * multiplier) + (ema * (1.0 - multiplier))
+            # This is the same as: ema = (price - ema) * multiplier + ema
+            ema = (price * multiplier) + (ema * (1.0 - multiplier))
         
         return round(ema, 4)
     
     @staticmethod
     def calculate_ema_series(closes: List[float], period: int) -> List[float]:
-        """Calculate full EMA series (optimized for MACD)
+        """Calculate full EMA series (optimized for MACD) - TradingView compatible
         
         Returns the complete EMA series for all data points after initial period.
+        Uses TradingView's exact EMA formula for consistency.
         """
         if len(closes) < period:
             return [closes[-1]] if closes else [0]
         
-        multiplier = 2 / (period + 1)
+        # TradingView uses: multiplier = 2 / (period + 1)
+        multiplier = 2.0 / (period + 1.0)
         
-        # Start with SMA for first EMA value
-        ema = sum(closes[:period]) / period
+        # Start with SMA of first period values (TradingView standard)
+        ema = sum(closes[:period]) / float(period)
         ema_series = [ema]
         
-        # Calculate EMA for rest of data
+        # Calculate EMA for rest of data using TradingView's exact formula
         for price in closes[period:]:
-            ema = (price - ema) * multiplier + ema
+            ema = (price * multiplier) + (ema * (1.0 - multiplier))
             ema_series.append(ema)
         
         return ema_series
@@ -856,14 +876,24 @@ class IndicatorEngine:
     
     @staticmethod
     def calculate_bollinger(closes: List[float], period: int = 20, std_dev: float = 2.0) -> Dict:
-        """Bollinger Bands"""
+        """Bollinger Bands - TradingView compatible
+        
+        Uses sample standard deviation (dividing by period - 1) to match TradingView.
+        """
         if len(closes) < period:
             price = closes[-1] if closes else 0
             return {"upper": price, "middle": price, "lower": price, "bandwidth": 0, "position": "middle"}
         
-        sma = sum(closes[-period:]) / period
-        variance = sum((p - sma) ** 2 for p in closes[-period:]) / period
-        std = math.sqrt(variance)
+        # Calculate SMA (middle band)
+        sma = sum(closes[-period:]) / float(period)
+        
+        # Calculate sample standard deviation (TradingView uses sample, not population)
+        # Sample std dev divides by (period - 1), not period
+        if period > 1:
+            variance = sum((p - sma) ** 2 for p in closes[-period:]) / float(period - 1)
+            std = math.sqrt(variance)
+        else:
+            std = 0.0
         
         upper = sma + std_dev * std
         lower = sma - std_dev * std
@@ -1144,9 +1174,16 @@ class IndicatorEngine:
 
 
 def calculate_all_indicators(klines: List[Dict]) -> Dict:
-    """Calculate all indicators from kline data"""
+    """Calculate all indicators from kline data
+    
+    Ensures klines are sorted chronologically (oldest to newest) for accurate calculations.
+    """
     if not klines:
         return {}
+    
+    # Ensure klines are sorted chronologically (oldest to newest)
+    # This is critical for accurate EMA, RSI, MACD, and other indicator calculations
+    klines = sorted(klines, key=lambda x: x["open_time"])
     
     closes = [k["close"] for k in klines]
     current_price = closes[-1]
@@ -1512,9 +1549,15 @@ async def check_higher_timeframe_trend(symbol: str, base_timeframe: str) -> Dict
 
 @app.get("/api/indicators/{symbol}/{interval}")
 async def get_indicators(symbol: str, interval: str):
-    """GET /api/indicators - Pre-calculated indicators"""
+    """GET /api/indicators - Pre-calculated indicators
+    
+    Uses 500 candles for accurate EMA200 and other indicator calculations.
+    """
     klines_data = await get_klines(symbol, interval, 500)
     klines = klines_data["klines"]
+    
+    # Ensure klines are sorted chronologically (oldest to newest)
+    klines.sort(key=lambda x: x["open_time"])
     
     indicators = calculate_all_indicators(klines)
     return {
@@ -1910,13 +1953,16 @@ async def analyze_chart(
                         "open_time": k[0], "open": float(k[1]), "high": float(k[2]),
                         "low": float(k[3]), "close": float(k[4]), "volume": float(k[5])
                     } for k in klines_raw]
+                # Ensure klines are sorted chronologically (oldest to newest)
+                klines.sort(key=lambda x: x["open_time"])
             else:
                 klines = []
         else:
             # Fetch with multi-source fallback (OKX -> CoinGecko -> Bybit -> Binance)
-            print(f"Fetching klines for analysis from multi-source fallback...")
+            # Use 500 candles for accurate EMA200 and other indicator calculations
+            print(f"Fetching klines for analysis from multi-source fallback (500 candles for accuracy)...")
             
-            klines = await fetch_okx_klines(symbol, timeframe, 100)
+            klines = await fetch_okx_klines(symbol, timeframe, 500)
             if not klines:
                 days = INTERVAL_TO_DAYS.get(timeframe.lower(), 1)
                 klines = await fetch_coingecko_ohlc(symbol, days)
@@ -1927,7 +1973,7 @@ async def analyze_chart(
                     "category": "spot",
                     "symbol": symbol,
                     "interval": bybit_interval,
-                    "limit": 200
+                    "limit": 500
                 })
                 if bybit_data and bybit_data.get("list"):
                     klines = []
@@ -1942,6 +1988,9 @@ async def analyze_chart(
                         })
             if not klines:
                 raise HTTPException(status_code=404, detail=f"Failed to fetch klines for {symbol} from any source")
+            
+            # Ensure klines are sorted chronologically (oldest to newest) for accurate calculations
+            klines.sort(key=lambda x: x["open_time"])
         
         # Use provided depth or fetch with multi-source fallback
         depth_data = {"largest_bid_wall": {"price": 0, "quantity": 0}, "largest_ask_wall": {"price": 0, "quantity": 0}}
