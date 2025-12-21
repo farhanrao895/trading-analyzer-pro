@@ -37,11 +37,13 @@ const SYMBOL_TO_COINGECKO: Record<string, string> = {
 
 export async function GET(
   request: Request,
-  { params }: { params: { symbol: string; interval: string } }
+  { params }: { params: Promise<{ symbol: string; interval: string }> | { symbol: string; interval: string } }
 ) {
   try {
-    const symbol = params.symbol.toUpperCase()
-    const interval = params.interval.toLowerCase()
+    // Handle both Next.js 14 and 15 (params might be Promise or object)
+    const resolvedParams = params instanceof Promise ? await params : params
+    const symbol = resolvedParams.symbol.toUpperCase()
+    const interval = resolvedParams.interval.toLowerCase()
     const limit = Math.min(parseInt(new URL(request.url).searchParams.get('limit') || '100'), 200)
     
     // 1. Try OKX first (has good kline data, not blocked)

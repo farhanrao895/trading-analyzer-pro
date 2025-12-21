@@ -5,10 +5,12 @@ const BACKEND_URL = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_BACKEND_U
 
 export async function GET(
   request: Request,
-  { params }: { params: { symbol: string; interval: string } }
+  { params }: { params: Promise<{ symbol: string; interval: string }> | { symbol: string; interval: string } }
 ) {
   try {
-    const { symbol, interval } = params
+    // Handle both Next.js 14 and 15 (params might be Promise or object)
+    const resolvedParams = params instanceof Promise ? await params : params
+    const { symbol, interval } = resolvedParams
     
     console.log(`[Next.js API] Forwarding /api/indicators/${symbol}/${interval} to Python backend: ${BACKEND_URL}`)
     

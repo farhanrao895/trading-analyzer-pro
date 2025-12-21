@@ -36,10 +36,12 @@ function formatDepthResponse(symbol: string, bids: DepthEntry[], asks: DepthEntr
 
 export async function GET(
   request: Request,
-  { params }: { params: { symbol: string } }
+  { params }: { params: Promise<{ symbol: string }> | { symbol: string } }
 ) {
   try {
-    const symbol = params.symbol.toUpperCase()
+    // Handle both Next.js 14 and 15 (params might be Promise or object)
+    const resolvedParams = params instanceof Promise ? await params : params
+    const symbol = resolvedParams.symbol.toUpperCase()
     const limit = Math.min(parseInt(new URL(request.url).searchParams.get('limit') || '20'), 50)
     
     // 1. Try OKX first (not blocked, good order book data)

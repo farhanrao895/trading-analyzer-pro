@@ -1,5 +1,9 @@
 import { NextResponse } from 'next/server'
 
+// Force dynamic rendering - disable all caching for live price data
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
+
 const COINGECKO_BASE_URL = 'https://api.coingecko.com/api/v3'
 const OKX_BASE_URL = 'https://www.okx.com/api/v5/market'
 const KRAKEN_BASE_URL = 'https://api.kraken.com/0/public'
@@ -27,16 +31,19 @@ const SYMBOL_TO_KRAKEN: Record<string, string> = {
 
 export async function GET(
   request: Request,
-  { params }: { params: { symbol: string } }
+  { params }: { params: Promise<{ symbol: string }> | { symbol: string } }
 ) {
   try {
-    const symbol = params.symbol.toUpperCase()
+    // Handle both Next.js 14 and 15 (params might be Promise or object)
+    const resolvedParams = params instanceof Promise ? await params : params
+    const symbol = resolvedParams.symbol.toUpperCase()
     const coinId = SYMBOL_TO_COINGECKO[symbol] || symbol.replace('USDT', '').toLowerCase()
     
     // 1. Try CoinGecko first (primary - not blocked)
     console.log(`Fetching price for ${symbol} from CoinGecko...`)
     const cgRes = await fetch(
-      `${COINGECKO_BASE_URL}/coins/${coinId}?localization=false&tickers=false&community_data=false&developer_data=false`
+      `${COINGECKO_BASE_URL}/coins/${coinId}?localization=false&tickers=false&community_data=false&developer_data=false`,
+      { cache: 'no-store' } // Disable caching for live price data
     ).catch(() => null)
     
     if (cgRes?.ok) {
@@ -56,6 +63,12 @@ export async function GET(
           open_price: (md.current_price?.usd || 0) - (md.price_change_24h || 0),
           weighted_avg_price: md.current_price?.usd || 0,
           source: 'coingecko'
+        }, {
+          headers: {
+            'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0'
+          }
         })
       }
     }
@@ -63,7 +76,7 @@ export async function GET(
     // 2. Try OKX (fallback 1)
     console.log(`CoinGecko failed, trying OKX for ${symbol}...`)
     const okxSymbol = `${symbol.replace('USDT', '')}-USDT`
-    const okxRes = await fetch(`${OKX_BASE_URL}/ticker?instId=${okxSymbol}`).catch(() => null)
+    const okxRes = await fetch(`${OKX_BASE_URL}/ticker?instId=${okxSymbol}`, { cache: 'no-store' }).catch(() => null)
     
     if (okxRes?.ok) {
       const okxData = await okxRes.json()
@@ -84,6 +97,12 @@ export async function GET(
           open_price: open24h,
           weighted_avg_price: last,
           source: 'okx'
+        }, {
+          headers: {
+            'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0'
+          }
         })
       }
     }
@@ -92,7 +111,7 @@ export async function GET(
     const krakenPair = SYMBOL_TO_KRAKEN[symbol]
     if (krakenPair) {
       console.log(`OKX failed, trying Kraken for ${symbol}...`)
-      const krakenRes = await fetch(`${KRAKEN_BASE_URL}/Ticker?pair=${krakenPair}`).catch(() => null)
+      const krakenRes = await fetch(`${KRAKEN_BASE_URL}/Ticker?pair=${krakenPair}`, { cache: 'no-store' }).catch(() => null)
       
       if (krakenRes?.ok) {
         const krakenData = await krakenRes.json()
@@ -113,6 +132,12 @@ export async function GET(
             open_price: open,
             weighted_avg_price: last,
             source: 'kraken'
+          }, {
+            headers: {
+              'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+              'Pragma': 'no-cache',
+              'Expires': '0'
+            }
           })
         }
       }
@@ -120,7 +145,7 @@ export async function GET(
     
     // 4. Try Bybit (fallback 3)
     console.log(`Kraken failed, trying Bybit for ${symbol}...`)
-    const bybitRes = await fetch(`${BYBIT_BASE_URL}/tickers?category=spot&symbol=${symbol}`).catch(() => null)
+    const bybitRes = await fetch(`${BYBIT_BASE_URL}/tickers?category=spot&symbol=${symbol}`, { cache: 'no-store' }).catch(() => null)
     
     if (bybitRes?.ok) {
       const bybitData = await bybitRes.json()
@@ -141,13 +166,19 @@ export async function GET(
           open_price: prevPrice,
           weighted_avg_price: currentPrice,
           source: 'bybit'
+        }, {
+          headers: {
+            'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0'
+          }
         })
       }
     }
     
     // 5. Try Binance (last resort)
     console.log(`Bybit failed, trying Binance for ${symbol} (last resort)...`)
-    const res = await fetch(`${BINANCE_BASE_URL}/ticker/24hr?symbol=${symbol}`).catch(() => null)
+    const res = await fetch(`${BINANCE_BASE_URL}/ticker/24hr?symbol=${symbol}`, { cache: 'no-store' }).catch(() => null)
     
     if (res?.ok) {
       const data = await res.json()
@@ -164,6 +195,12 @@ export async function GET(
         open_price: parseFloat(data.openPrice),
         weighted_avg_price: parseFloat(data.weightedAvgPrice),
         source: 'binance'
+      }, {
+        headers: {
+          'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+          'Pragma': 'no-cache',
+          'Expires': '0'
+        }
       })
     }
     
