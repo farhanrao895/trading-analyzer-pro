@@ -723,22 +723,26 @@ const ConfluenceScoreCard = ({ score, breakdown }: { score: number; breakdown: R
       </div>
 
       <div className="space-y-2">
-        {Object.entries(breakdown || {}).map(([key, value]) => (
-          <div key={key} className="flex items-center justify-between text-sm">
-            <span className="text-slate-400">{key}</span>
-            <div className="flex items-center gap-2">
-              <div className="w-20 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-cyan-500 rounded-full"
-                  style={{ width: `${Math.min(100, (Math.abs(value) / 20) * 100)}%` }}
-                />
+        {Object.entries(breakdown || {}).map(([key, value]) => {
+          // Ensure value is a number
+          const numValue = typeof value === 'number' ? value : (typeof value === 'string' ? parseFloat(value) || 0 : 0)
+          return (
+            <div key={key} className="flex items-center justify-between text-sm">
+              <span className="text-slate-400">{key}</span>
+              <div className="flex items-center gap-2">
+                <div className="w-20 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                  <div 
+                    className="h-full bg-cyan-500 rounded-full"
+                    style={{ width: `${Math.min(100, (Math.abs(numValue) / 20) * 100)}%` }}
+                  />
+                </div>
+                <span className={`w-12 text-right font-medium ${numValue >= 0 ? 'text-cyan-400' : 'text-red-400'}`}>
+                  {numValue >= 0 ? '+' : ''}{numValue.toFixed(1)}
+                </span>
               </div>
-              <span className={`w-12 text-right font-medium ${value >= 0 ? 'text-cyan-400' : 'text-red-400'}`}>
-                {value >= 0 ? '+' : ''}{value.toFixed(1)}
-              </span>
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )
