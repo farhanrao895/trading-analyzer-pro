@@ -469,7 +469,7 @@ const DivergenceCard = ({ divergence }: { divergence?: IndicatorData }) => {
 }
 
 const OrderBlockCard = ({ orderBlock, type }: { orderBlock?: OrderBlock; type: 'bullish' | 'bearish' }) => {
-  if (!orderBlock || !orderBlock.is_valid) {
+  if (!orderBlock || !orderBlock.is_valid || typeof orderBlock.high !== 'number' || typeof orderBlock.low !== 'number') {
     return null
   }
 
@@ -516,7 +516,7 @@ const OrderBlockCard = ({ orderBlock, type }: { orderBlock?: OrderBlock; type: '
 }
 
 const FairValueGapCard = ({ fvg }: { fvg?: FairValueGap }) => {
-  if (!fvg) {
+  if (!fvg || typeof fvg.top !== 'number' || typeof fvg.bottom !== 'number') {
     return null
   }
 
@@ -577,7 +577,7 @@ const FairValueGapCard = ({ fvg }: { fvg?: FairValueGap }) => {
 }
 
 const LiquidityZoneCard = ({ zone, position }: { zone?: LiquidityZone; position: 'above' | 'below' }) => {
-  if (!zone) {
+  if (!zone || typeof zone.price !== 'number') {
     return null
   }
 
@@ -668,13 +668,13 @@ const BreakOfStructureCard = ({ bos }: { bos?: BreakOfStructure }) => {
             </div>
           </>
         )}
-        {bos.last_swing_high && (
+        {bos.last_swing_high && typeof bos.last_swing_high === 'number' && (
           <div className="flex items-center justify-between">
             <span className="text-xs text-slate-400">Last Swing High:</span>
             <span className="text-sm text-slate-200">${bos.last_swing_high.toFixed(4)}</span>
           </div>
         )}
-        {bos.last_swing_low && (
+        {bos.last_swing_low && typeof bos.last_swing_low === 'number' && (
           <div className="flex items-center justify-between">
             <span className="text-xs text-slate-400">Last Swing Low:</span>
             <span className="text-sm text-slate-200">${bos.last_swing_low.toFixed(4)}</span>
