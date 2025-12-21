@@ -839,6 +839,15 @@ class IndicatorEngine:
     def detect_divergence(prices: List[float], indicator_values: List[float], lookback: int = 50, indicator_type: str = "rsi", current_price: float = None) -> Dict:
         """Detect bullish/bearish divergences - Professional Implementation
         
+        IMPORTANT: Divergence classification is PURELY based on price-indicator relationships.
+        Trend is NOT used to classify divergence. Trend is context, not classification.
+        
+        Divergence Types (Price-Indicator Relationship):
+        - Bullish Regular: Price makes lower low, indicator makes higher low
+        - Bullish Hidden: Price makes higher low, indicator makes lower low
+        - Bearish Regular: Price makes higher high, indicator makes lower high
+        - Bearish Hidden: Price makes lower high, indicator makes higher high
+        
         Uses Williams Fractals for swing detection with proper filtering:
         - Minimum 5 bars between swings
         - Maximum 60 bars between swings  
@@ -890,6 +899,11 @@ class IndicatorEngine:
         else:
             MIN_INDICATOR_DIFF = 0  # No threshold for unknown types
         
+        # ============================================================
+        # BULLISH DIVERGENCE DETECTION (Price-Indicator Relationship)
+        # ============================================================
+        # NOTE: Classification is based ONLY on price vs indicator movement.
+        # Trend is NOT used here - it's purely mathematical comparison.
         # Check for BULLISH DIVERGENCE (price lower low, indicator higher low)
         if len(price_troughs) >= 2 and len(ind_troughs) >= 2:
             # Get last two troughs
@@ -927,7 +941,13 @@ class IndicatorEngine:
                             signal = "bullish"
                             strength = "moderate"
         
+        # ============================================================
+        # BEARISH DIVERGENCE DETECTION (Price-Indicator Relationship)
+        # ============================================================
+        # NOTE: Classification is based ONLY on price vs indicator movement.
+        # Trend is NOT used here - it's purely mathematical comparison.
         # Check for BEARISH DIVERGENCE (price higher high, indicator lower high)
+        # Note: Only check if no bullish divergence found (prioritize first match)
         if len(price_peaks) >= 2 and len(ind_peaks) >= 2 and divergence_type == "none":
             # Get last two peaks
             pp1_idx, pp1_val = price_peaks[-2]
